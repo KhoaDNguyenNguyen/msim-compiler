@@ -116,8 +116,23 @@ class MS14Document:
 
         full_block, ci_id = m.group(1), m.group(2)
 
+        def parse_si_num(v_s: str) -> float:
+            s = v_s.strip().rstrip("FHOhm")
+            m_n = re.match(r'^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([a-zA-Z]*)$', s)
+            if not m_n:
+                return 1000.0
+            mult = {"G": 1e9, "M": 1e6, "k": 1e3, "K": 1e3, "": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12}.get(m_n.group(2), 1.0)
+            return float(m_n.group(1)) * mult
+
+        num_v = parse_si_num(str(spice_val))
+
         def replace_params(pm):
             p_block = pm.group(0)
+            p_block = re.sub(
+                r'(<doubles>\s*<Item\s+Value=")[^"]+("\s*/>)',
+                rf'\g<1>{num_v:g}\g<2>',
+                p_block, count=1
+            )
             items = list(re.finditer(r'(<Item\s+Value="&amp;ASC)([^"]+)("\s*/>)', p_block))
             if len(items) >= 2:
                 t_item = items[1]
@@ -128,6 +143,10 @@ class MS14Document:
         new_block = re.sub(
             r'<CiaParamList\s+Class="CiaParamList">.*?</CiaParamList>',
             replace_params, full_block, count=1, flags=re.DOTALL
+        )
+        new_block = re.sub(
+            r'<CiaProperDlg\s+Class="CiaProperDlg"[^>]*>.*?</CiaProperDlg>',
+            replace_params, new_block, count=1, flags=re.DOTALL
         )
         self.xml_text = self.xml_text[:m.start()] + new_block + self.xml_text[m.end():]
 
