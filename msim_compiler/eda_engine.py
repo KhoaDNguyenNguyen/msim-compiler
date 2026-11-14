@@ -6,8 +6,10 @@ import ctypes
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Set
 from .logger import get_logger
+from .config_registry import GLOBAL_CONFIG
+from .dom_engine import UniversalNetGraph
 
-GRID_PITCH = 9
+GRID_PITCH = GLOBAL_CONFIG.routing.grid_pitch
 
 @dataclass
 class PartPlacementSpec:
@@ -47,12 +49,9 @@ class DisjointSetUnion:
         self.rank = [0] * n
 
     def find(self, i: int) -> int:
-        path = []
         while self.parent[i] != i:
-            path.append(i)
+            self.parent[i] = self.parent[self.parent[i]]
             i = self.parent[i]
-        for node in path:
-            self.parent[node] = i
         return i
 
     def union(self, i: int, j: int) -> bool:
@@ -97,7 +96,12 @@ class AffineGrid2D:
         return (nx, ny)
 
     @staticmethod
-    def logistic_penalty(occupancy: float, capacity: float = 4.0, steepness: float = 1.35, max_penalty: float = 240.0) -> int:
+    def logistic_penalty(
+        occupancy: float,
+        capacity: float = GLOBAL_CONFIG.routing.logistic_capacity,
+        steepness: float = GLOBAL_CONFIG.routing.logistic_steepness,
+        max_penalty: float = GLOBAL_CONFIG.routing.logistic_max_penalty
+    ) -> int:
         z = max(-20.0, min(20.0, steepness * (occupancy - capacity)))
         return int(round(max_penalty / (1.0 + math.exp(-z))))
 
@@ -116,20 +120,29 @@ class AffineGrid2D:
 
     @staticmethod
     def simplify_orthogonal_polyline(points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        simplified: List[Tuple[int, int]] = []
+        dedup: List[Tuple[int, int]] = []
         for pt in points:
-            if not simplified or simplified[-1] != pt:
-                if len(simplified) >= 2:
-                    p1 = simplified[-2]
-                    p2 = simplified[-1]
-                    if (p1[0] == p2[0] == pt[0]) or (p1[1] == p2[1] == pt[1]):
-                        simplified[-1] = pt
-                        continue
-                simplified.append(pt)
+            if not dedup or dedup[-1] != pt:
+                dedup.append(pt)
+        if len(dedup) < 3:
+            return dedup
+        simplified: List[Tuple[int, int]] = [dedup[0]]
+        for i in range(1, len(dedup) - 1):
+            prv = simplified[-1]
+            cur = dedup[i]
+            nxt = dedup[i + 1]
+            if (prv[0] == cur[0] == nxt[0]) or (prv[1] == cur[1] == nxt[1]):
+                continue
+            simplified.append(cur)
+        simplified.append(dedup[-1])
         return simplified
 
 class NativeEDAEngine:
-    def __init__(self, grid_width: int = 180, grid_height: int = 120):
+    def __init__(
+        self,
+        grid_width: int = GLOBAL_CONFIG.routing.grid_width,
+        grid_height: int = GLOBAL_CONFIG.routing.grid_height
+    ):
         self.logger = get_logger("EDA-DSA-ENGINE")
         self.grid_w = grid_width
         self.grid_h = grid_height
@@ -162,9 +175,57 @@ class NativeEDAEngine:
                 ctypes.c_int32
             ]
             lib.astar_orthogonal_route.restype = ctypes.c_int32
+            if hasattr(lib, "solve_quadratic_placement_mt"):
+                lib.solve_quadratic_placement_mt.argtypes = [
+                    ctypes.c_int32,
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.c_int32,
+                    ctypes.POINTER(ctypes.c_int32),
+                    ctypes.POINTER(ctypes.c_int32)
+                ]
+                lib.solve_quadratic_placement_mt.restype = ctypes.c_int32
             return lib
         except Exception:
             return None
+
+    def solve_spectral_quadratic_placement(
+        self,
+        parts: List[PartPlacementSpec],
+        nets: List[NetConnectionSpec]
+    ) -> List[PartPlacementSpec]:
+        n = len(parts)
+        if n == 0:
+            return parts
+
+        graph = UniversalNetGraph(
+            parts=[{"refdes": p.refdes, "x": p.x, "y": p.y} for p in parts],
+            nets={net.net_name: net.terminals for net in nets}
+        )
+        _, adj, anchor_w, anchor_x, anchor_y = graph.build_laplacian_matrices()
+
+        if self._dll is not None and hasattr(self._dll, "solve_quadratic_placement_mt"):
+            c_adj = (ctypes.c_double * (n * n))(*adj)
+            c_aw = (ctypes.c_double * n)(*anchor_w)
+            c_ax = (ctypes.c_double * n)(*anchor_x)
+            c_ay = (ctypes.c_double * n)(*anchor_y)
+            out_x = (ctypes.c_int32 * n)()
+            out_y = (ctypes.c_int32 * n)()
+            self._dll.solve_quadratic_placement_mt(n, c_adj, c_aw, c_ax, c_ay, GRID_PITCH, out_x, out_y)
+            for idx, p in enumerate(parts):
+                if p.x is None:
+                    p.x = int(out_x[idx])
+                if p.y is None:
+                    p.y = int(out_y[idx])
+        else:
+            for idx, p in enumerate(parts):
+                if p.x is None:
+                    p.x = AffineGrid2D.snap9(anchor_x[idx])
+                if p.y is None:
+                    p.y = AffineGrid2D.snap9(anchor_y[idx])
+        return parts
 
     def reset_grid(self) -> None:
         n = self.grid_w * self.grid_h
@@ -218,17 +279,26 @@ class NativeEDAEngine:
             return False
         return self.obstacle_grid[gy * self.grid_w + gx] == 0
 
-    def _find_nearest_free_junction(self, target_x: int, target_y: int) -> Tuple[int, int]:
+    def _find_nearest_free_junction(
+        self,
+        target_x: int,
+        target_y: int,
+        forbidden_coords: Optional[Set[Tuple[int, int]]] = None
+    ) -> Tuple[int, int]:
+        forb = forbidden_coords or set()
         gx0 = AffineGrid2D.snap9(target_x) // GRID_PITCH
         gy0 = AffineGrid2D.snap9(target_y) // GRID_PITCH
-        if self._is_grid_point_free(gx0, gy0):
-            return (gx0 * GRID_PITCH, gy0 * GRID_PITCH)
-        for radius in range(1, 12):
+        pt0 = (gx0 * GRID_PITCH, gy0 * GRID_PITCH)
+        if self._is_grid_point_free(gx0, gy0) and pt0 not in forb:
+            return pt0
+        for radius in range(1, 14):
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
-                    if abs(dx) + abs(dy) == radius and self._is_grid_point_free(gx0 + dx, gy0 + dy):
-                        return ((gx0 + dx) * GRID_PITCH, (gy0 + dy) * GRID_PITCH)
-        return (gx0 * GRID_PITCH, gy0 * GRID_PITCH)
+                    if abs(dx) + abs(dy) == radius:
+                        cand = ((gx0 + dx) * GRID_PITCH, (gy0 + dy) * GRID_PITCH)
+                        if self._is_grid_point_free(gx0 + dx, gy0 + dy) and cand not in forb:
+                            return cand
+        return pt0
 
     def synthesize_steiner_junction_plan(
         self,
@@ -244,92 +314,86 @@ class NativeEDAEngine:
             plan.point_to_point_edges.append(((t0[0], t0[1]), (t1[0], t1[1])))
             return plan
 
+        pin_coords: Set[Tuple[int, int]] = {(t[2], t[3]) for t in terminals}
+
         if net_name == "0" and k >= 3:
-            ordered = sorted(terminals, key=lambda item: (item[2], item[3]))
-            bus_y = AffineGrid2D.snap9(max(t[3] for t in ordered) + 18)
-            j_names: List[str] = []
-            for idx, t in enumerate(ordered):
-                j_id = f"__J_{net_name}_{idx}__"
-                jx, jy = self._find_nearest_free_junction(t[2], bus_y)
-                plan.junctions.append((j_id, jx, jy))
-                j_names.append(j_id)
-                plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
-            for idx in range(len(j_names) - 1):
-                plan.point_to_point_edges.append(((j_names[idx], "J"), (j_names[idx + 1], "J")))
-            return plan
+            gnd_terms = [t for t in terminals if t[0].upper().startswith("GND") or t[0] == "0"]
+            comp_terms = [t for t in terminals if t not in gnd_terms]
+            max_comp_y = max((t[3] for t in comp_terms), default=max(t[3] for t in terminals))
+            bus_y = AffineGrid2D.snap9(max_comp_y + 18)
 
-        if k in (3, 4):
-            leads_x = sorted(t[4] for t in terminals)
-            leads_y = sorted(t[5] for t in terminals)
-            med_x = leads_x[len(leads_x) // 2]
-            med_y = leads_y[len(leads_y) // 2]
-            pin_coords = {(t[2], t[3]) for t in terminals}
-            if (med_x, med_y) in pin_coords:
-                med_x += GRID_PITCH
-            jx, jy = self._find_nearest_free_junction(med_x, med_y)
-            j_id = f"__J_{net_name}_0__"
-            plan.junctions.append((j_id, jx, jy))
+            by_col: Dict[int, List[Tuple[str, str, int, int, int, int]]] = {}
             for t in terminals:
-                plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+                by_col.setdefault(t[2], []).append(t)
+            sorted_cols = sorted(by_col.keys())
+
+            if len(sorted_cols) == 1:
+                col_x = sorted_cols[0]
+                jx, jy = self._find_nearest_free_junction(col_x, bus_y, pin_coords)
+                pin_coords.add((jx, jy))
+                j_id = f"__J_{net_name}_0__"
+                plan.junctions.append((j_id, jx, jy))
+                for t in terminals:
+                    plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+                return plan
+
+            col_reps: List[Tuple[str, str]] = []
+            for idx, col_x in enumerate(sorted_cols):
+                col_t = by_col[col_x]
+                is_internal = (0 < idx < len(sorted_cols) - 1)
+                if is_internal or len(col_t) >= 2:
+                    jx, jy = self._find_nearest_free_junction(col_x, bus_y, pin_coords)
+                    pin_coords.add((jx, jy))
+                    j_id = f"__J_{net_name}_{idx}__"
+                    plan.junctions.append((j_id, jx, jy))
+                    for t in col_t:
+                        plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+                    col_reps.append((j_id, "J"))
+                else:
+                    col_reps.append((col_t[0][0], col_t[0][1]))
+
+            for i in range(len(col_reps) - 1):
+                plan.point_to_point_edges.append((col_reps[i], col_reps[i + 1]))
             return plan
 
-        candidate_xs = sorted({t[4] for t in terminals})
-        candidate_ys = sorted({t[5] for t in terminals})
-        med_x = candidate_xs[len(candidate_xs) // 2]
-        med_y = candidate_ys[len(candidate_ys) // 2]
+        horiz_leads = [t[3] for t in terminals if t[4] != t[2]]
+        if horiz_leads:
+            spine_y = min(horiz_leads)
+        else:
+            spine_y = AffineGrid2D.snap9(min(t[3] for t in terminals) - 18)
 
-        nodes: List[Tuple[str, str, int, int]] = [(t[0], t[1], t[4], t[5]) for t in terminals]
-        seen_coords = {(t[2], t[3]) for t in terminals}
+        by_col_sig: Dict[int, List[Tuple[str, str, int, int, int, int]]] = {}
+        for t in terminals:
+            by_col_sig.setdefault(t[2], []).append(t)
+        sorted_sig_cols = sorted(by_col_sig.keys())
 
-        best_steiner: List[Tuple[int, int]] = []
-        for cx in candidate_xs:
-            pt = self._find_nearest_free_junction(cx, med_y)
-            if pt not in seen_coords:
-                seen_coords.add(pt)
-                best_steiner.append(pt)
+        if len(sorted_sig_cols) >= 3:
+            sig_reps: List[Tuple[str, str]] = []
+            for idx, col_x in enumerate(sorted_sig_cols):
+                col_t = by_col_sig[col_x]
+                is_internal = (0 < idx < len(sorted_sig_cols) - 1)
+                if is_internal or len(col_t) >= 2:
+                    jx, jy = self._find_nearest_free_junction(col_x, spine_y, pin_coords)
+                    pin_coords.add((jx, jy))
+                    j_id = f"__J_{net_name}_{idx}__"
+                    plan.junctions.append((j_id, jx, jy))
+                    for t in col_t:
+                        plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+                    sig_reps.append((j_id, "J"))
+                else:
+                    sig_reps.append((col_t[0][0], col_t[0][1]))
+            for i in range(len(sig_reps) - 1):
+                plan.point_to_point_edges.append((sig_reps[i], sig_reps[i + 1]))
+            return plan
 
-        selected_j: List[Tuple[str, int, int]] = []
-        for idx, (jx, jy) in enumerate(best_steiner[:max(1, k - 2)]):
-            j_id = f"__J_{net_name}_{idx}__"
-            selected_j.append((j_id, jx, jy))
-            nodes.append((j_id, "J", jx, jy))
-
-        n_total = len(nodes)
-        edges: List[Tuple[int, int, int]] = []
-        for i in range(n_total):
-            for j in range(i + 1, n_total):
-                dist_l1 = abs(nodes[i][2] - nodes[j][2]) + abs(nodes[i][3] - nodes[j][3])
-                edges.append((dist_l1, i, j))
-        edges.sort(key=lambda e: e[0])
-
-        dsu = DisjointSetUnion(n_total)
-        adj: Dict[int, List[int]] = {i: [] for i in range(n_total)}
-        for w, u, v in edges:
-            if dsu.union(u, v):
-                adj[u].append(v)
-                adj[v].append(u)
-
-        changed = True
-        while changed:
-            changed = False
-            for idx in range(len(terminals), n_total):
-                if len(adj[idx]) <= 1:
-                    for nbr in list(adj[idx]):
-                        adj[nbr].remove(idx)
-                    adj[idx].clear()
-                    changed = True
-
-        active_steiner = {idx for idx in range(len(terminals), n_total) if len(adj[idx]) >= 2}
-        for idx in sorted(active_steiner):
-            j_id, _, jx, jy = nodes[idx]
-            plan.junctions.append((j_id, jx, jy))
-
-        visited_pairs: Set[Tuple[int, int]] = set()
-        for u in range(n_total):
-            for v in adj[u]:
-                if u < v and (u, v) not in visited_pairs:
-                    visited_pairs.add((u, v))
-                    plan.point_to_point_edges.append(((nodes[u][0], nodes[u][1]), (nodes[v][0], nodes[v][1])))
+        xs_sorted = sorted(t[2] for t in terminals)
+        med_x = xs_sorted[len(xs_sorted) // 2]
+        jx, jy = self._find_nearest_free_junction(med_x, spine_y, pin_coords)
+        pin_coords.add((jx, jy))
+        j_id = f"__J_{net_name}_0__"
+        plan.junctions.append((j_id, jx, jy))
+        for t in terminals:
+            plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
         return plan
 
     def _is_grid_segment_clear(
@@ -462,7 +526,9 @@ class NativeEDAEngine:
                 net_id,
                 sx, sy, slx, sly,
                 tx, ty, tlx, tly,
-                10, 45, 160,
+                GLOBAL_CONFIG.routing.step_cost,
+                GLOBAL_CONFIG.routing.bend_penalty,
+                GLOBAL_CONFIG.routing.cross_penalty,
                 out_buf, max_pts
             )
             if cnt >= 2:
@@ -484,9 +550,9 @@ class NativeEDAEngine:
         tx: int, ty: int,
         tlx: int, tly: int
     ) -> List[Tuple[int, int]]:
-        step_cost = 10
-        bend_penalty = 45
-        cross_penalty = 160
+        step_cost = GLOBAL_CONFIG.routing.step_cost
+        bend_penalty = GLOBAL_CONFIG.routing.bend_penalty
+        cross_penalty = GLOBAL_CONFIG.routing.cross_penalty
 
         init_dir = 4
         if slx > sx: init_dir = 0
@@ -506,7 +572,7 @@ class NativeEDAEngine:
         goal_state: Optional[Tuple[int, int, int]] = None
 
         while pq:
-            f_val, g_val, cx, cy, cdir = heapq.heappop(pq)
+            _, g_val, cx, cy, cdir = heapq.heappop(pq)
             if g_val > dist.get((cx, cy, cdir), 10**9):
                 continue
             if cx == tlx and cy == tly:
