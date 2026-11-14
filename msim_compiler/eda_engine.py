@@ -1,0 +1,536 @@
+import os
+import re
+import math
+import heapq
+import ctypes
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Set
+from .logger import get_logger
+
+GRID_PITCH = 9
+
+@dataclass
+class PartPlacementSpec:
+    refdes: str
+    part_query: str
+    value_or_label: str = ""
+    x: Optional[int] = None
+    y: Optional[int] = None
+    rotation: int = 0
+    row_hint: int = 0
+    col_hint: int = 0
+
+@dataclass
+class NetConnectionSpec:
+    net_name: str
+    terminals: List[Tuple[str, str]] = field(default_factory=list)
+
+@dataclass
+class SteinerJunctionPlan:
+    junctions: List[Tuple[str, int, int]] = field(default_factory=list)
+    point_to_point_edges: List[Tuple[Tuple[str, str], Tuple[str, str]]] = field(default_factory=list)
+
+@dataclass
+class ClosedLoopAuditReport:
+    total_symbols: int
+    total_junctions: int
+    total_wires: int
+    total_bends: int
+    total_wirelength: int
+    max_pin_degree: int
+    bounding_box: Tuple[int, int, int, int]
+    net_summary: Dict[str, List[str]]
+
+class AffineGrid2D:
+    @staticmethod
+    def snap9(value: float) -> int:
+        return int(round(value / float(GRID_PITCH))) * GRID_PITCH
+
+    @staticmethod
+    def rotate_point(x: int, y: int, cx: int, cy: int, angle_deg: int) -> Tuple[int, int]:
+        deg = angle_deg % 360
+        dx = x - cx
+        dy = y - cy
+        if deg == 90:
+            return (cx - dy, cy + dx)
+        if deg == 180:
+            return (cx - dx, cy - dy)
+        if deg == 270:
+            return (cx + dy, cy - dx)
+        return (x, y)
+
+    @classmethod
+    def rotate_bbox(cls, bbox: Tuple[int, int, int, int], cx: int, cy: int, angle_deg: int) -> Tuple[int, int, int, int]:
+        x0, y0, x1, y1 = bbox
+        pts = [
+            cls.rotate_point(x0, y0, cx, cy, angle_deg),
+            cls.rotate_point(x1, y1, cx, cy, angle_deg),
+            cls.rotate_point(x0, y1, cx, cy, angle_deg),
+            cls.rotate_point(x1, y0, cx, cy, angle_deg)
+        ]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    @staticmethod
+    def simplify_orthogonal_polyline(points: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        simplified: List[Tuple[int, int]] = []
+        for pt in points:
+            if not simplified or simplified[-1] != pt:
+                if len(simplified) >= 2:
+                    p1 = simplified[-2]
+                    p2 = simplified[-1]
+                    if (p1[0] == p2[0] == pt[0]) or (p1[1] == p2[1] == pt[1]):
+                        simplified[-1] = pt
+                        continue
+                simplified.append(pt)
+        return simplified
+
+class NativeEDAEngine:
+    def __init__(self, grid_width: int = 180, grid_height: int = 120):
+        self.logger = get_logger("EDA-DSA-ENGINE")
+        self.grid_w = grid_width
+        self.grid_h = grid_height
+        self.obstacle_grid: List[int] = [0] * (grid_width * grid_height)
+        self.congestion_grid: List[int] = [0] * (grid_width * grid_height)
+        self.net_owner_grid: List[int] = [0] * (grid_width * grid_height)
+        self.net_name_to_id: Dict[str, int] = {}
+        self.routed_trees: Dict[str, Set[Tuple[int, int]]] = {}
+        self.component_boxes: Dict[str, Tuple[int, int, int, int]] = {}
+        self._dll = self._load_native_dll()
+
+    def _load_native_dll(self) -> Optional[ctypes.CDLL]:
+        dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "msim_eda_accel.dll")
+        if not os.path.exists(dll_path):
+            return None
+        try:
+            lib = ctypes.CDLL(dll_path)
+            lib.astar_orthogonal_route.argtypes = [
+                ctypes.c_int32, ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32,
+                ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int32),
+                ctypes.c_int32
+            ]
+            lib.astar_orthogonal_route.restype = ctypes.c_int32
+            return lib
+        except Exception:
+            return None
+
+    def reset_grid(self) -> None:
+        n = self.grid_w * self.grid_h
+        self.obstacle_grid = [0] * n
+        self.congestion_grid = [0] * n
+        self.net_owner_grid = [0] * n
+        self.net_name_to_id.clear()
+        self.routed_trees.clear()
+        self.component_boxes.clear()
+
+    def _get_net_id(self, net_name: str) -> int:
+        if net_name not in self.net_name_to_id:
+            self.net_name_to_id[net_name] = len(self.net_name_to_id) + 1
+        return self.net_name_to_id[net_name]
+
+    def register_component_obstacle(
+        self,
+        world_bbox: Tuple[int, int, int, int],
+        pin_coords_and_leads: List[Tuple[int, int, int, int]],
+        refdes: str = ""
+    ) -> None:
+        if refdes:
+            self.component_boxes[refdes] = world_bbox
+        gx0 = max(0, world_bbox[0] // GRID_PITCH)
+        gy0 = max(0, world_bbox[1] // GRID_PITCH)
+        gx1 = min(self.grid_w - 1, world_bbox[2] // GRID_PITCH)
+        gy1 = min(self.grid_h - 1, world_bbox[3] // GRID_PITCH)
+
+        for gy in range(gy0, gy1 + 1):
+            for gx in range(gx0, gx1 + 1):
+                self.obstacle_grid[gy * self.grid_w + gx] = 1
+
+        for hy in range(max(0, gy0 - 1), min(self.grid_h - 1, gy1 + 1) + 1):
+            for hx in range(max(0, gx0 - 1), min(self.grid_w - 1, gx1 + 1) + 1):
+                idx = hy * self.grid_w + hx
+                if self.obstacle_grid[idx] == 0:
+                    self.congestion_grid[idx] += 4
+
+        for px, py, lx, ly in pin_coords_and_leads:
+            gpx, gpy = px // GRID_PITCH, py // GRID_PITCH
+            glx, gly = lx // GRID_PITCH, ly // GRID_PITCH
+            steps = max(abs(glx - gpx), abs(gly - gpy), 1)
+            for s in range(steps + 1):
+                cx = gpx + (glx - gpx) * s // steps
+                cy = gpy + (gly - gpy) * s // steps
+                if 0 <= cx < self.grid_w and 0 <= cy < self.grid_h:
+                    self.obstacle_grid[cy * self.grid_w + cx] = 0
+
+    def _is_grid_point_free(self, gx: int, gy: int) -> bool:
+        if not (0 <= gx < self.grid_w and 0 <= gy < self.grid_h):
+            return False
+        return self.obstacle_grid[gy * self.grid_w + gx] == 0
+
+    def _find_nearest_free_junction(self, target_x: int, target_y: int) -> Tuple[int, int]:
+        gx0 = AffineGrid2D.snap9(target_x) // GRID_PITCH
+        gy0 = AffineGrid2D.snap9(target_y) // GRID_PITCH
+        if self._is_grid_point_free(gx0, gy0):
+            return (gx0 * GRID_PITCH, gy0 * GRID_PITCH)
+        for radius in range(1, 12):
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    if abs(dx) + abs(dy) == radius and self._is_grid_point_free(gx0 + dx, gy0 + dy):
+                        return ((gx0 + dx) * GRID_PITCH, (gy0 + dy) * GRID_PITCH)
+        return (gx0 * GRID_PITCH, gy0 * GRID_PITCH)
+
+    def synthesize_steiner_junction_plan(
+        self,
+        net_name: str,
+        terminals: List[Tuple[str, str, int, int, int, int]]
+    ) -> SteinerJunctionPlan:
+        plan = SteinerJunctionPlan()
+        k = len(terminals)
+        if k < 2:
+            return plan
+        if k == 2:
+            t0, t1 = terminals[0], terminals[1]
+            plan.point_to_point_edges.append(((t0[0], t0[1]), (t1[0], t1[1])))
+            return plan
+
+        if net_name == "0" and k >= 3:
+            ordered = sorted(terminals, key=lambda item: (item[2], item[3]))
+            bus_y = AffineGrid2D.snap9(max(t[3] for t in ordered) + 18)
+            j_names: List[str] = []
+            for idx, t in enumerate(ordered):
+                j_id = f"__J_{net_name}_{idx}__"
+                jx, jy = self._find_nearest_free_junction(t[2], bus_y)
+                plan.junctions.append((j_id, jx, jy))
+                j_names.append(j_id)
+                plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+            for idx in range(len(j_names) - 1):
+                plan.point_to_point_edges.append(((j_names[idx], "J"), (j_names[idx + 1], "J")))
+            return plan
+
+        if k in (3, 4):
+            leads_x = sorted(t[4] for t in terminals)
+            leads_y = sorted(t[5] for t in terminals)
+            med_x = leads_x[len(leads_x) // 2]
+            med_y = leads_y[len(leads_y) // 2]
+            pin_coords = {(t[2], t[3]) for t in terminals}
+            if (med_x, med_y) in pin_coords:
+                med_x += GRID_PITCH
+            jx, jy = self._find_nearest_free_junction(med_x, med_y)
+            j_id = f"__J_{net_name}_0__"
+            plan.junctions.append((j_id, jx, jy))
+            for t in terminals:
+                plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+            return plan
+
+        ordered = sorted(terminals, key=lambda item: (item[2], item[3]))
+        ys_med = sorted(t[5] for t in ordered)[len(ordered) // 2]
+        j_list: List[str] = []
+        for idx, t in enumerate(ordered):
+            j_id = f"__J_{net_name}_{idx}__"
+            jx, jy = self._find_nearest_free_junction(t[4], ys_med)
+            plan.junctions.append((j_id, jx, jy))
+            j_list.append(j_id)
+            plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
+        for idx in range(len(j_list) - 1):
+            plan.point_to_point_edges.append(((j_list[idx], "J"), (j_list[idx + 1], "J")))
+        return plan
+
+    def _is_grid_segment_clear(
+        self,
+        gx0: int,
+        gy0: int,
+        gx1: int,
+        gy1: int,
+        net_id: int,
+        allow_endpoints: Set[Tuple[int, int]]
+    ) -> bool:
+        steps = max(abs(gx1 - gx0), abs(gy1 - gy0))
+        if steps == 0:
+            return True
+        for s in range(steps + 1):
+            cx = gx0 + (gx1 - gx0) * s // steps
+            cy = gy0 + (gy1 - gy0) * s // steps
+            if not (0 <= cx < self.grid_w and 0 <= cy < self.grid_h):
+                return False
+            cell = cy * self.grid_w + cx
+            if (cx, cy) not in allow_endpoints and self.obstacle_grid[cell] > 0:
+                return False
+            owner = self.net_owner_grid[cell]
+            if owner > 0 and owner != net_id:
+                if s == 0 or s == steps:
+                    return False
+                if gx0 == gx1:
+                    l_own = self.net_owner_grid[cy * self.grid_w + max(0, cx - 1)]
+                    r_own = self.net_owner_grid[cy * self.grid_w + min(self.grid_w - 1, cx + 1)]
+                    if l_own != owner or r_own != owner:
+                        return False
+                else:
+                    u_own = self.net_owner_grid[max(0, cy - 1) * self.grid_w + cx]
+                    d_own = self.net_owner_grid[min(self.grid_h - 1, cy + 1) * self.grid_w + cx]
+                    if u_own != owner or d_own != owner:
+                        return False
+        return True
+
+    def _try_pattern_route(
+        self,
+        net_id: int,
+        sx: int, sy: int,
+        slx: int, sly: int,
+        tx: int, ty: int,
+        tlx: int, tly: int
+    ) -> Optional[List[Tuple[int, int]]]:
+        allowed = {(sx, sy), (slx, sly), (tx, ty), (tlx, tly)}
+        dx1, dy1 = slx - sx, sly - sy
+        dx2, dy2 = tlx - tx, tly - ty
+
+        if sy == ty and (dx1 == 0 or (tx - sx) * dx1 >= 0) and (dx2 == 0 or (sx - tx) * dx2 >= 0):
+            if self._is_grid_segment_clear(sx, sy, tx, ty, net_id, allowed):
+                return [(sx, sy), (tx, ty)]
+
+        if sx == tx and (dy1 == 0 or (ty - sy) * dy1 >= 0) and (dy2 == 0 or (sy - ty) * dy2 >= 0):
+            if self._is_grid_segment_clear(sx, sy, tx, ty, net_id, allowed):
+                return [(sx, sy), (tx, ty)]
+
+        candidates: List[List[Tuple[int, int]]] = []
+
+        c1_x, c1_y = tx, sy
+        if ((dx1 == 0 and dy1 == 0) or ((c1_x - sx) * dx1 >= 0 and (c1_y - sy) * dy1 >= 0)) and \
+           ((dx2 == 0 and dy2 == 0) or ((c1_x - tx) * dx2 >= 0 and (c1_y - ty) * dy2 >= 0)):
+            candidates.append([(sx, sy), (c1_x, c1_y), (tx, ty)])
+
+        c2_x, c2_y = sx, ty
+        if ((dx1 == 0 and dy1 == 0) or ((c2_x - sx) * dx1 >= 0 and (c2_y - sy) * dy1 >= 0)) and \
+           ((dx2 == 0 and dy2 == 0) or ((c2_x - tx) * dx2 >= 0 and (c2_y - ty) * dy2 >= 0)):
+            candidates.append([(sx, sy), (c2_x, c2_y), (tx, ty)])
+
+        candidates.append([(sx, sy), (slx, sly), (tlx, sly), (tlx, tly), (tx, ty)])
+        candidates.append([(sx, sy), (slx, sly), (slx, tly), (tlx, tly), (tx, ty)])
+
+        mid_x = (slx + tlx) // 2
+        mid_y = (sly + tly) // 2
+        candidates.append([(sx, sy), (slx, sly), (mid_x, sly), (mid_x, tly), (tlx, tly), (tx, ty)])
+        candidates.append([(sx, sy), (slx, sly), (slx, mid_y), (tlx, mid_y), (tlx, tly), (tx, ty)])
+
+        for cand in candidates:
+            clean = AffineGrid2D.simplify_orthogonal_polyline(cand)
+            ok = True
+            for i in range(len(clean) - 1):
+                if not self._is_grid_segment_clear(clean[i][0], clean[i][1], clean[i + 1][0], clean[i + 1][1], net_id, allowed):
+                    ok = False
+                    break
+            if ok:
+                return clean
+        return None
+
+    def route_pin_pair(
+        self,
+        net_name: str,
+        x1: int,
+        y1: int,
+        lx1: int,
+        ly1: int,
+        x2: int,
+        y2: int,
+        lx2: int,
+        ly2: int
+    ) -> List[Tuple[int, int]]:
+        net_id = self._get_net_id(net_name)
+        sx, sy = x1 // GRID_PITCH, y1 // GRID_PITCH
+        slx, sly = lx1 // GRID_PITCH, ly1 // GRID_PITCH
+        tx, ty = x2 // GRID_PITCH, y2 // GRID_PITCH
+        tlx, tly = lx2 // GRID_PITCH, ly2 // GRID_PITCH
+
+        if (sx, sy) == (tx, ty):
+            return [(x1, y1), (x2, y2)]
+
+        for gx, gy in ((sx, sy), (slx, sly), (tx, ty), (tlx, tly)):
+            if 0 <= gx < self.grid_w and 0 <= gy < self.grid_h:
+                self.obstacle_grid[gy * self.grid_w + gx] = 0
+
+        pattern_pts = self._try_pattern_route(net_id, sx, sy, slx, sly, tx, ty, tlx, tly)
+        if pattern_pts is not None:
+            self._commit_path_to_grid(net_name, net_id, pattern_pts)
+            return AffineGrid2D.simplify_orthogonal_polyline([(gx * GRID_PITCH, gy * GRID_PITCH) for gx, gy in pattern_pts])
+
+        path_grid: List[Tuple[int, int]] = []
+        if self._dll is not None:
+            c_obs = (ctypes.c_int32 * len(self.obstacle_grid))(*self.obstacle_grid)
+            c_cong = (ctypes.c_int32 * len(self.congestion_grid))(*self.congestion_grid)
+            c_owner = (ctypes.c_int32 * len(self.net_owner_grid))(*self.net_owner_grid)
+            max_pts = 512
+            out_buf = (ctypes.c_int32 * (max_pts * 2))()
+            cnt = self._dll.astar_orthogonal_route(
+                self.grid_w, self.grid_h,
+                c_obs, c_cong, c_owner,
+                net_id,
+                sx, sy, slx, sly,
+                tx, ty, tlx, tly,
+                10, 45, 160,
+                out_buf, max_pts
+            )
+            if cnt >= 2:
+                for i in range(cnt):
+                    path_grid.append((out_buf[i * 2], out_buf[i * 2 + 1]))
+
+        if not path_grid:
+            path_grid = self._python_astar_route(net_id, sx, sy, slx, sly, tx, ty, tlx, tly)
+
+        self._commit_path_to_grid(net_name, net_id, path_grid)
+        world_pts = [(gx * GRID_PITCH, gy * GRID_PITCH) for gx, gy in path_grid]
+        return AffineGrid2D.simplify_orthogonal_polyline(world_pts)
+
+    def _python_astar_route(
+        self,
+        net_id: int,
+        sx: int, sy: int,
+        slx: int, sly: int,
+        tx: int, ty: int,
+        tlx: int, tly: int
+    ) -> List[Tuple[int, int]]:
+        step_cost = 10
+        bend_penalty = 45
+        cross_penalty = 160
+
+        init_dir = 4
+        if slx > sx: init_dir = 0
+        elif slx < sx: init_dir = 1
+        elif sly > sy: init_dir = 2
+        elif sly < sy: init_dir = 3
+
+        start_state = (slx, sly, init_dir)
+        dist: Dict[Tuple[int, int, int], int] = {start_state: step_cost}
+        parent: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
+
+        def h_func(gx: int, gy: int) -> int:
+            return (abs(gx - tlx) + abs(gy - tly)) * step_cost
+
+        pq = [(step_cost + h_func(slx, sly), step_cost, slx, sly, init_dir)]
+        dirs = ((1, 0, 0), (-1, 0, 1), (0, 1, 2), (0, -1, 3))
+        goal_state: Optional[Tuple[int, int, int]] = None
+
+        while pq:
+            f_val, g_val, cx, cy, cdir = heapq.heappop(pq)
+            if g_val > dist.get((cx, cy, cdir), 10**9):
+                continue
+            if cx == tlx and cy == tly:
+                goal_state = (cx, cy, cdir)
+                break
+
+            for dx, dy, ndir in dirs:
+                nx, ny = cx + dx, cy + dy
+                if not (0 <= nx < self.grid_w and 0 <= ny < self.grid_h):
+                    continue
+                cell = ny * self.grid_w + nx
+                if self.obstacle_grid[cell] > 0 and not (nx == tlx and ny == tly):
+                    continue
+
+                mc = step_cost
+                if cdir != 4 and cdir != ndir:
+                    mc += bend_penalty
+                owner = self.net_owner_grid[cell]
+                if owner > 0 and owner != net_id:
+                    mc += cross_penalty + self.congestion_grid[cell] * 8
+                elif owner == net_id:
+                    mc = max(1, step_cost // 2)
+                else:
+                    mc += self.congestion_grid[cell]
+
+                ng = g_val + mc
+                nstate = (nx, ny, ndir)
+                if ng < dist.get(nstate, 10**9):
+                    dist[nstate] = ng
+                    parent[nstate] = (cx, cy, cdir)
+                    heapq.heappush(pq, (ng + h_func(nx, ny), ng, nx, ny, ndir))
+
+        if goal_state is None:
+            mid_x = (slx + tlx) // 2
+            return [(sx, sy), (slx, sly), (mid_x, sly), (mid_x, tly), (tlx, tly), (tx, ty)]
+
+        rev: List[Tuple[int, int]] = [(tx, ty)]
+        cur: Optional[Tuple[int, int, int]] = goal_state
+        while cur is not None:
+            rev.append((cur[0], cur[1]))
+            cur = parent.get(cur)
+        rev.append((sx, sy))
+        rev.reverse()
+        return rev
+
+    def _commit_path_to_grid(self, net_name: str, net_id: int, grid_pts: List[Tuple[int, int]]) -> None:
+        tree_set = self.routed_trees.setdefault(net_name, set())
+        for i in range(len(grid_pts) - 1):
+            x0, y0 = grid_pts[i]
+            x1, y1 = grid_pts[i + 1]
+            steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+            for s in range(steps + 1):
+                cx = x0 + (x1 - x0) * s // steps
+                cy = y0 + (y1 - y0) * s // steps
+                if 0 <= cx < self.grid_w and 0 <= cy < self.grid_h:
+                    cell = cy * self.grid_w + cx
+                    self.net_owner_grid[cell] = net_id
+                    self.congestion_grid[cell] += 3
+                    tree_set.add((cx, cy))
+
+    def audit_schematic_dom(self, xml_text: str) -> ClosedLoopAuditReport:
+        sym_count = len(re.findall(r'<Item\s+ID="\d+"\s+Class="CIITSymbolComp">', xml_text))
+        obj_sec_m = re.search(r'<CODComposite\s+Class="CODComposite"[^>]*>\s*<Objects>(.*?)</Objects>\s*<ReferencedComponents>', xml_text, re.DOTALL)
+        obj_sec = obj_sec_m.group(1) if obj_sec_m else ""
+        junc_count = len(re.findall(r'<Item\s+ID="\d+"\s+Class="CODPinComp">\s*<CODPinComp', obj_sec))
+
+        pin_conns = re.findall(r'<CIITPinConnectorComp\b[^>]*>.*?<ConnectList>(.*?)</ConnectList>\s*</CIITPinConnectorComp>', obj_sec, re.DOTALL)
+        max_pin_deg = max((len(re.findall(r'<Item\s+ID="\d+"\s+Class="CODPinComp"\s*/>', pc)) for pc in pin_conns), default=0)
+
+        wire_blocks = re.findall(r'<CIITLinkComp\s+[^>]*>\s*<Points>(.*?)</Points>', obj_sec, re.DOTALL)
+        total_bends = 0
+        total_wl = 0
+        xs_all: List[int] = []
+        ys_all: List[int] = []
+
+        for wb in wire_blocks:
+            pts = [(int(float(mx)), int(float(my))) for mx, my in re.findall(r'<Item\s+X="([^"]+)"\s+Y="([^"]+)"\s*/>', wb)]
+            if len(pts) >= 2:
+                total_bends += max(0, len(pts) - 2)
+                for i in range(len(pts) - 1):
+                    total_wl += abs(pts[i + 1][0] - pts[i][0]) + abs(pts[i + 1][1] - pts[i][1])
+                for px, py in pts:
+                    xs_all.append(px)
+                    ys_all.append(py)
+
+        comp_names: Dict[str, str] = {}
+        for m in re.finditer(r'<Item\s+CiID="(\d+)"\s+Class="CiComponent">\s*<CiComponent\s+[^>]*LocalName="&amp;ASC([^"]+)"', xml_text):
+            comp_names[m.group(1)] = m.group(2)
+
+        port_map: Dict[str, str] = {}
+        for m in re.finditer(r'<Item\s+CiID="(\d+)"\s+Class="CiPort">\s*<CiPort\s+Class="CiPort"\s+LocalName="&amp;ASC([^"]+)"\s+Component="(\d+)"', xml_text):
+            pid, pname, cid = m.groups()
+            port_map[pid] = f"{comp_names.get(cid, cid)}.{pname}"
+
+        net_summary: Dict[str, List[str]] = {}
+        for m in re.finditer(r'<Item\s+CiID="(\d+)"\s+Class="CiNode">\s*<CiNode\s+[^>]*LocalName="&amp;ASC([^"]+)"[^>]*>.*?<Ports>(.*?)</Ports>\s*</CiNode>', xml_text, re.DOTALL):
+            nid, nname, pbody = m.groups()
+            pids = re.findall(r'CiID="(\d+)"', pbody)
+            net_summary[nname] = [port_map.get(p, p) for p in pids]
+
+        bbox = (min(xs_all, default=0), min(ys_all, default=0), max(xs_all, default=0), max(ys_all, default=0))
+        report = ClosedLoopAuditReport(
+            total_symbols=sym_count,
+            total_junctions=junc_count,
+            total_wires=len(wire_blocks),
+            total_bends=total_bends,
+            total_wirelength=total_wl,
+            max_pin_degree=max_pin_deg,
+            bounding_box=bbox,
+            net_summary=net_summary
+        )
+        self.logger.info(
+            f"Closed-Loop Audit: Symbols={report.total_symbols}, Junctions={report.total_junctions}, Wires={report.total_wires}, MaxPinDeg={report.max_pin_degree}, Bends={report.total_bends}, WL={report.total_wirelength}u"
+        )
+        return report
