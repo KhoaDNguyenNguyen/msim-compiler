@@ -340,6 +340,8 @@ class MultisimSchematicBuilder:
         self.placed_components: Dict[str, PlacedComponentInstance] = {}
         self.placed_junctions: Dict[str, PlacedJunctionInstance] = {}
         self.net_nodes: Dict[str, Tuple[int, int]] = {}
+        self._archetypes: Dict[str, str] = {}
+        self._extract_native_component_archetypes()
         self._discover_existing_nets()
 
     @staticmethod
@@ -377,6 +379,47 @@ class MultisimSchematicBuilder:
     def _alloc_id(self) -> int:
         self._next_id += 8
         return self._next_id
+
+    def _extract_native_component_archetypes(self) -> None:
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        base_tpl = os.path.join(pkg_dir, "templates", "base_sallen_key.ms14")
+        src_xml = self.codec.decode_to_string(base_tpl).replace("\r\n", "\n") if os.path.exists(base_tpl) else self.xml_text
+        for ref, key in (("R1", "RESISTOR"), ("C1", "CAPACITOR")):
+            m = re.search(
+                r'<Item\s+CiID="\d+"\s+Class="CiComponent">\s*<CiComponent\s+[^>]*LocalName="&amp;ASC' + ref + r'"[^>]*>(.*?)</CiComponent>\s*</Item>',
+                src_xml,
+                re.DOTALL
+            )
+            if m:
+                self._archetypes[key] = m.group(1)
+
+    @staticmethod
+    def _parse_si_to_float(val_str: str) -> float:
+        s = val_str.strip()
+        for u in ("Ohm", "ohm", "F", "H", "V", "A", "Hz"):
+            if s.endswith(u) and len(s) > len(u):
+                s = s[:-len(u)].strip()
+        m = re.match(r'^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([a-zA-Z]*)$', s)
+        if not m:
+            return 1000.0
+        num = float(m.group(1))
+        suf = m.group(2)
+        scale_map = {
+            "T": 1e12, "G": 1e9, "M": 1e6, "MEG": 1e6, "k": 1e3, "K": 1e3,
+            "": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15
+        }
+        return num * scale_map.get(suf, 1.0)
+
+    def place_ground_symbol(self, x: int, y: int, refdes: Optional[str] = None) -> PlacedComponentInstance:
+        x = AffineGrid2D.snap9(x)
+        y = AffineGrid2D.snap9(y)
+        gnd_ref = refdes or f"GND_{len([k for k in self.placed_components if k.startswith('GND')]) + 1}"
+        try:
+            inst = self.place_part_from_db("GROUND", gnd_ref, x=x, y=y, value_or_label="0", rotation=0)
+            return inst
+        except Exception:
+            inst = self.place_part_from_db("RESISTOR_VIRTUAL", gnd_ref, x=x, y=y, value_or_label="0", rotation=90)
+            return inst
 
     def _find_circuit_id(self) -> int:
         m = re.search(r'<Item\s+CiID="(\d+)"\s+Class="CiCircuit">', self.xml_text)
@@ -1078,55 +1121,98 @@ class MultisimSchematicBuilder:
 
         model_attr = f' Model="{model_ci_id}"' if model_ci_id else ""
         spice_val = value_or_label if value_or_label else "1k"
+        numeric_val = self._parse_si_to_float(spice_val)
         mod_id_str = f"&amp;ASC{part.model_id}" if part.model_id else ""
         mfr_str = f"&amp;ASC{part.manufacturer}" if part.manufacturer else "&amp;ASCGeneric"
         fgrp_str = f"&amp;ASC{part.family_group}" if part.family_group else "&amp;ASCBasic"
         fdesc_str = f"&amp;ASC{part.function_desc}" if part.function_desc else "&amp;ASC$ANALOG$"
 
-        ci_comp_block = (
-            f'<Item CiID="{ci_id}" Class="CiComponent">\n'
-            f'<CiComponent Class="CiComponent" LocalName="&amp;ASC{refdes}"{model_attr} SymCompID="{sym_id}" InstanceID="{comp_guid}" Circuit="{self.circuit_id}">\n'
-            f'<Attributes>\n'
-            f'<Item/>\n'
-            f'<Item>\n<CiaSpiceTmpltExprt Class="CiaSpiceTmpltExprt" String="&amp;ASC{part.spice_template}\n"/>\n</Item>\n'
-            f'<Item>\n<CiaParamList Class="CiaParamList">\n<doubles/>\n<strings/>\n'
-            f'<parameters>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC{spice_val}"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n</parameters>\n'
-            f'<paramindicators>\n<Item Value="0"/>\n<Item Value="1"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n</paramindicators>\n'
-            f'</CiaParamList>\n</Item>\n'
-            f'<Item/>\n'
-            f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n'
-            f'<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value="&amp;ASC{part.comp_name}"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value="{mod_id_str}"/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCIIT"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCL0"/>\n<Item Value="&amp;ASCV7"/>\n<Item Value="&amp;ASCA0"/>\n<Item Value="{fgrp_str}"/>\n<Item Value="{fdesc_str}"/>\n<Item Value="{mfr_str}"/>\n<Item Value="&amp;ASCV6"/>\n<Item Value="&amp;ASCA0"/>\n<Item Value="&amp;ASCB"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n'
-            f'</strings>\n</CiaCollString>\n</Item>\n'
-            f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n'
-            f'<Item Value="&amp;ASC{part.family_id}"/>\n<Item Value="&amp;ASCProduct"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value=""/>\n<Item Value="&amp;ASC{part.ref_template}"/>\n<Item Value="&amp;ASC{part.spice_template}"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCDMN"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC17"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n'
-            f'</strings>\n</CiaCollString>\n</Item>\n'
-            f'<Item/>\n<Item/>\n'
-            f'<Item>\n<CiaFault Class="CiaFault" FaultType="3" LeakResistanceValue="100" LeakResistanceScale="&amp;ASC Ohm">\n<FaultPorts/>\n</CiaFault>\n</Item>\n'
-            f'<Item/>\n<Item/>\n<Item/>\n<Item/>\n'
-            f'<Item>\n<CiaProperDlg Class="CiaProperDlg" ActivePage="2" LastTimeInTableViewStatus="0">\n<doubles/>\n<strings/>\n<parameters/>\n<paramindicators/>\n</CiaProperDlg>\n</Item>\n'
-            f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value="&amp;ASCA"/>\n</strings>\n</CiaCollString>\n</Item>\n'
-            f'<Item/>\n<Item/>\n'
-            f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="200"/>\n</Item>\n'
-            f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings/>\n</CiaCollString>\n</Item>\n'
-            f'<Item/>\n'
-            f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="-1"/>\n</Item>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String=""/>\n</Item>\n'
-            + ('<Item/>\n' * 14) +
-            f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="1"/>\n</Item>\n'
-            f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="1"/>\n</Item>\n'
-            f'<Item/>\n<Item/>\n<Item/>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC{spice_val}"/>\n</Item>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC{disp_val}"/>\n</Item>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String=""/>\n</Item>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC1"/>\n</Item>\n'
-            f'<Item/>\n'
-            f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="0"/>\n</Item>\n'
-            f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value="&amp;ASCA"/>\n</strings>\n</CiaCollString>\n</Item>\n'
-            f'<Item/>\n<Item/>\n<Item/>\n<Item/>\n'
-            f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC0"/>\n</Item>\n'
-            f'</Attributes>\n<Ports>\n' + "\n".join(port_id_refs) + '\n</Ports>\n</CiComponent>\n</Item>\n' +
-            "\n".join(ci_ports_xml)
-        )
+        comp_up = part.comp_name.upper()
+        fam_up = part.family_name.upper()
+        unit_label = "Ohm" if "RESISTOR" in fam_up else ("F" if "CAPACITOR" in fam_up else ("H" if "INDUCTOR" in fam_up else ""))
+
+        archetype_key = "RESISTOR" if "RESISTOR_VIRTUAL" in comp_up else ("CAPACITOR" if "CAPACITOR_VIRTUAL" in comp_up else "")
+        if archetype_key and archetype_key in self._archetypes:
+            cloned_body = self._archetypes[archetype_key]
+            def patch_param_block(pm):
+                p_blk = pm.group(0)
+                p_blk = re.sub(
+                    r'(<doubles>\s*<Item\s+Value=")[^"]+("\s*/>)',
+                    rf'\g<1>{numeric_val:g}\g<2>',
+                    p_blk, count=1
+                )
+                items = list(re.finditer(r'(<Item\s+Value="&amp;ASC)([^"]*)("\s*/>)', p_blk))
+                if len(items) >= 2:
+                    ti = items[1]
+                    p_blk = p_blk[:ti.start()] + ti.group(1) + spice_val + ti.group(3) + p_blk[ti.end():]
+                return p_blk
+
+            cloned_body = re.sub(r'<CiaParamList\s+Class="CiaParamList">.*?</CiaParamList>', patch_param_block, cloned_body, count=1, flags=re.DOTALL)
+            cloned_body = re.sub(r'<CiaProperDlg\s+Class="CiaProperDlg"[^>]*>.*?</CiaProperDlg>', patch_param_block, cloned_body, count=1, flags=re.DOTALL)
+            cloned_body = re.sub(
+                r'(<Ports>).*?(</Ports>)',
+                lambda m: m.group(1) + "\n" + "\n".join(port_id_refs) + "\n" + m.group(2),
+                cloned_body, count=1, flags=re.DOTALL
+            )
+            ci_comp_block = (
+                f'<Item CiID="{ci_id}" Class="CiComponent">\n'
+                f'<CiComponent Class="CiComponent" LocalName="&amp;ASC{refdes}"{model_attr} SymCompID="{sym_id}" InstanceID="{comp_guid}" Circuit="{self.circuit_id}">'
+                f'{cloned_body}'
+                f'</CiComponent>\n</Item>\n' +
+                "\n".join(ci_ports_xml)
+            )
+        else:
+            ci_comp_block = (
+                f'<Item CiID="{ci_id}" Class="CiComponent">\n'
+                f'<CiComponent Class="CiComponent" LocalName="&amp;ASC{refdes}"{model_attr} SymCompID="{sym_id}" InstanceID="{comp_guid}" Circuit="{self.circuit_id}">\n'
+                f'<Attributes>\n'
+                f'<Item/>\n'
+                f'<Item>\n<CiaSpiceTmpltExprt Class="CiaSpiceTmpltExprt" String="&amp;ASC{part.spice_template}\n"/>\n</Item>\n'
+                f'<Item>\n<CiaParamList Class="CiaParamList">\n'
+                f'<doubles>\n<Item Value="{numeric_val:g}"/>\n<Item Value="0"/>\n<Item Value="27"/>\n</doubles>\n'
+                f'<strings>\n<Item Value="&amp;ASC{unit_label}"/>\n</strings>\n'
+                f'<parameters>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC{spice_val}"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n</parameters>\n'
+                f'<paramindicators>\n<Item Value="0"/>\n<Item Value="1"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n</paramindicators>\n'
+                f'</CiaParamList>\n</Item>\n'
+                f'<Item/>\n'
+                f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n'
+                f'<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value="&amp;ASC{part.comp_name}"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value="{mod_id_str}"/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCIIT"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCL0"/>\n<Item Value="&amp;ASCV7"/>\n<Item Value="&amp;ASCA0"/>\n<Item Value="{fgrp_str}"/>\n<Item Value="{fdesc_str}"/>\n<Item Value="{mfr_str}"/>\n<Item Value="&amp;ASCV6"/>\n<Item Value="&amp;ASCA0"/>\n<Item Value="&amp;ASCB"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n'
+                f'</strings>\n</CiaCollString>\n</Item>\n'
+                f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n'
+                f'<Item Value="&amp;ASC{part.family_id}"/>\n<Item Value="&amp;ASCProduct"/>\n<Item Value="&amp;ASC{part.family_name}"/>\n<Item Value=""/>\n<Item Value="&amp;ASC{part.ref_template}"/>\n<Item Value="&amp;ASC{part.spice_template}"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASCDMN"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC17"/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n'
+                f'</strings>\n</CiaCollString>\n</Item>\n'
+                f'<Item/>\n<Item/>\n'
+                f'<Item>\n<CiaFault Class="CiaFault" FaultType="3" LeakResistanceValue="100" LeakResistanceScale="&amp;ASC Ohm">\n<FaultPorts/>\n</CiaFault>\n</Item>\n'
+                f'<Item/>\n<Item/>\n<Item/>\n<Item/>\n'
+                f'<Item>\n<CiaProperDlg Class="CiaProperDlg" ActivePage="0" LastTimeInTableViewStatus="0">\n'
+                f'<doubles>\n<Item Value="{numeric_val:g}"/>\n<Item Value="0"/>\n<Item Value="27"/>\n</doubles>\n'
+                f'<strings>\n<Item Value="&amp;ASC{unit_label}"/>\n</strings>\n'
+                f'<parameters>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC{spice_val}"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC0"/>\n<Item Value="&amp;ASC27"/>\n</parameters>\n'
+                f'<paramindicators>\n<Item Value="0"/>\n<Item Value="1"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n<Item Value="0"/>\n</paramindicators>\n'
+                f'</CiaProperDlg>\n</Item>\n'
+                f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value="&amp;ASCA"/>\n</strings>\n</CiaCollString>\n</Item>\n'
+                f'<Item/>\n<Item/>\n'
+                f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="200"/>\n</Item>\n'
+                f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings/>\n</CiaCollString>\n</Item>\n'
+                f'<Item/>\n'
+                f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="-1"/>\n</Item>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String=""/>\n</Item>\n'
+                + ('<Item/>\n' * 14) +
+                f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="1"/>\n</Item>\n'
+                f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="1"/>\n</Item>\n'
+                f'<Item/>\n<Item/>\n<Item/>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC{spice_val}"/>\n</Item>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC{disp_val}"/>\n</Item>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String=""/>\n</Item>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC1"/>\n</Item>\n'
+                f'<Item/>\n'
+                f'<Item>\n<CiaDOUBLE Class="CiaDOUBLE" Double="0"/>\n</Item>\n'
+                f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value="&amp;ASCA"/>\n</strings>\n</CiaCollString>\n</Item>\n'
+                f'<Item/>\n<Item/>\n<Item/>\n<Item/>\n'
+                f'<Item>\n<CiaCString Class="CiaCString" String="&amp;ASC0"/>\n</Item>\n'
+                f'</Attributes>\n<Ports>\n' + "\n".join(port_id_refs) + '\n</Ports>\n</CiComponent>\n</Item>\n' +
+                "\n".join(ci_ports_xml)
+            )
 
         self.xml_text = self.xml_text.replace(
             "</HiddenTitleBlockStorage>\n<Elements>",
@@ -1423,7 +1509,21 @@ class MultisimSchematicBuilder:
                 rotation=p.rotation
             )
         for net in nets:
-            self.connect_net(net.net_name, net.terminals)
+            terms = list(net.terminals)
+            if net.net_name == "0" and terms:
+                has_explicit_gnd = any(
+                    cref in self.placed_components and "GROUND" in self.placed_components[cref].part.comp_name.upper()
+                    for cref, _ in terms
+                )
+                if not has_explicit_gnd:
+                    xs = [self.placed_components[c].pins[p].world_x for c, p in terms if c in self.placed_components]
+                    ys = [self.placed_components[c].pins[p].world_y for c, p in terms if c in self.placed_components]
+                    gx = AffineGrid2D.snap9(sum(xs) / len(xs)) if xs else 450
+                    gy = AffineGrid2D.snap9((max(ys) if ys else 369) + 45)
+                    gnd_inst = self.place_ground_symbol(gx, gy)
+                    gnd_pin = next(iter(gnd_inst.pins.keys()), "1")
+                    terms.append((gnd_inst.refdes, gnd_pin))
+            self.connect_net(net.net_name, terms)
         return self
 
     def add_schematic_info_banner(self, title: str, lines: List[str], x: int = 333, y: int = 477) -> None:
