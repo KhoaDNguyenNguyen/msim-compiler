@@ -1,0 +1,11 @@
+[build-system]
+requires = []
+build-backend = "pep517_backend"
+backend-path = ["_build_backend"]
+
+[project]
+name = "msim-compiler"
+version = "1.0.0"
+description = "Industrial Zero-GUI NI Multisim 14 (.ms14) Schematic Synthesizer, A* Router & Binary Compiler"
+requires-python = ">=3.9"
+dependencies = []
