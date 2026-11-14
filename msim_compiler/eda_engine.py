@@ -41,23 +41,65 @@ class ClosedLoopAuditReport:
     bounding_box: Tuple[int, int, int, int]
     net_summary: Dict[str, List[str]]
 
+class DisjointSetUnion:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, i: int) -> int:
+        path = []
+        while self.parent[i] != i:
+            path.append(i)
+            i = self.parent[i]
+        for node in path:
+            self.parent[node] = i
+        return i
+
+    def union(self, i: int, j: int) -> bool:
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i == root_j:
+            return False
+        if self.rank[root_i] < self.rank[root_j]:
+            self.parent[root_i] = root_j
+        elif self.rank[root_i] > self.rank[root_j]:
+            self.parent[root_j] = root_i
+        else:
+            self.parent[root_j] = root_i
+            self.rank[root_i] += 1
+        return True
+
 class AffineGrid2D:
     @staticmethod
     def snap9(value: float) -> int:
         return int(round(value / float(GRID_PITCH))) * GRID_PITCH
 
     @staticmethod
-    def rotate_point(x: int, y: int, cx: int, cy: int, angle_deg: int) -> Tuple[int, int]:
+    def se2_matrix(cx: int, cy: int, angle_deg: int) -> Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]:
         deg = angle_deg % 360
-        dx = x - cx
-        dy = y - cy
         if deg == 90:
-            return (cx - dy, cy + dx)
-        if deg == 180:
-            return (cx - dx, cy - dy)
-        if deg == 270:
-            return (cx + dy, cy - dx)
-        return (x, y)
+            r00, r01, r10, r11 = 0, -1, 1, 0
+        elif deg == 180:
+            r00, r01, r10, r11 = -1, 0, 0, -1
+        elif deg == 270:
+            r00, r01, r10, r11 = 0, 1, -1, 0
+        else:
+            r00, r01, r10, r11 = 1, 0, 0, 1
+        tx = cx - r00 * cx - r01 * cy
+        ty = cy - r10 * cx - r11 * cy
+        return ((r00, r01, tx), (r10, r11, ty), (0, 0, 1))
+
+    @classmethod
+    def rotate_point(cls, x: int, y: int, cx: int, cy: int, angle_deg: int) -> Tuple[int, int]:
+        m = cls.se2_matrix(cx, cy, angle_deg)
+        nx = m[0][0] * x + m[0][1] * y + m[0][2]
+        ny = m[1][0] * x + m[1][1] * y + m[1][2]
+        return (nx, ny)
+
+    @staticmethod
+    def logistic_penalty(occupancy: float, capacity: float = 4.0, steepness: float = 1.35, max_penalty: float = 240.0) -> int:
+        z = max(-20.0, min(20.0, steepness * (occupancy - capacity)))
+        return int(round(max_penalty / (1.0 + math.exp(-z))))
 
     @classmethod
     def rotate_bbox(cls, bbox: Tuple[int, int, int, int], cx: int, cy: int, angle_deg: int) -> Tuple[int, int, int, int]:
@@ -231,17 +273,63 @@ class NativeEDAEngine:
                 plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
             return plan
 
-        ordered = sorted(terminals, key=lambda item: (item[2], item[3]))
-        ys_med = sorted(t[5] for t in ordered)[len(ordered) // 2]
-        j_list: List[str] = []
-        for idx, t in enumerate(ordered):
+        candidate_xs = sorted({t[4] for t in terminals})
+        candidate_ys = sorted({t[5] for t in terminals})
+        med_x = candidate_xs[len(candidate_xs) // 2]
+        med_y = candidate_ys[len(candidate_ys) // 2]
+
+        nodes: List[Tuple[str, str, int, int]] = [(t[0], t[1], t[4], t[5]) for t in terminals]
+        seen_coords = {(t[2], t[3]) for t in terminals}
+
+        best_steiner: List[Tuple[int, int]] = []
+        for cx in candidate_xs:
+            pt = self._find_nearest_free_junction(cx, med_y)
+            if pt not in seen_coords:
+                seen_coords.add(pt)
+                best_steiner.append(pt)
+
+        selected_j: List[Tuple[str, int, int]] = []
+        for idx, (jx, jy) in enumerate(best_steiner[:max(1, k - 2)]):
             j_id = f"__J_{net_name}_{idx}__"
-            jx, jy = self._find_nearest_free_junction(t[4], ys_med)
+            selected_j.append((j_id, jx, jy))
+            nodes.append((j_id, "J", jx, jy))
+
+        n_total = len(nodes)
+        edges: List[Tuple[int, int, int]] = []
+        for i in range(n_total):
+            for j in range(i + 1, n_total):
+                dist_l1 = abs(nodes[i][2] - nodes[j][2]) + abs(nodes[i][3] - nodes[j][3])
+                edges.append((dist_l1, i, j))
+        edges.sort(key=lambda e: e[0])
+
+        dsu = DisjointSetUnion(n_total)
+        adj: Dict[int, List[int]] = {i: [] for i in range(n_total)}
+        for w, u, v in edges:
+            if dsu.union(u, v):
+                adj[u].append(v)
+                adj[v].append(u)
+
+        changed = True
+        while changed:
+            changed = False
+            for idx in range(len(terminals), n_total):
+                if len(adj[idx]) <= 1:
+                    for nbr in list(adj[idx]):
+                        adj[nbr].remove(idx)
+                    adj[idx].clear()
+                    changed = True
+
+        active_steiner = {idx for idx in range(len(terminals), n_total) if len(adj[idx]) >= 2}
+        for idx in sorted(active_steiner):
+            j_id, _, jx, jy = nodes[idx]
             plan.junctions.append((j_id, jx, jy))
-            j_list.append(j_id)
-            plan.point_to_point_edges.append(((t[0], t[1]), (j_id, "J")))
-        for idx in range(len(j_list) - 1):
-            plan.point_to_point_edges.append(((j_list[idx], "J"), (j_list[idx + 1], "J")))
+
+        visited_pairs: Set[Tuple[int, int]] = set()
+        for u in range(n_total):
+            for v in adj[u]:
+                if u < v and (u, v) not in visited_pairs:
+                    visited_pairs.add((u, v))
+                    plan.point_to_point_edges.append(((nodes[u][0], nodes[u][1]), (nodes[v][0], nodes[v][1])))
         return plan
 
     def _is_grid_segment_clear(
@@ -437,12 +525,13 @@ class NativeEDAEngine:
                 if cdir != 4 and cdir != ndir:
                     mc += bend_penalty
                 owner = self.net_owner_grid[cell]
+                sig_cost = AffineGrid2D.logistic_penalty(float(self.congestion_grid[cell]))
                 if owner > 0 and owner != net_id:
-                    mc += cross_penalty + self.congestion_grid[cell] * 8
+                    mc += cross_penalty + sig_cost
                 elif owner == net_id:
                     mc = max(1, step_cost // 2)
                 else:
-                    mc += self.congestion_grid[cell]
+                    mc += sig_cost // 4
 
                 ng = g_val + mc
                 nstate = (nx, ny, ndir)
