@@ -234,6 +234,24 @@ class MS14Document:
                 lambda m: m.group(1) + "\r\n" + subckt_body + "\r\n" + m.group(2),
                 self.xml_text, flags=re.DOTALL
             )
+
+            if len(cfg.harmonics) > 1:
+                extra_tones = cfg.harmonics[1:]
+                ext_lines: List[str] = []
+                for idx, tone in enumerate(extra_tones):
+                    nin = "n_xfg_raw_%p" if idx == 0 else f"n_xfg_h{idx}_%p"
+                    nout = "%t1" if idx == len(extra_tones) - 1 else f"n_xfg_h{idx+1}_%p"
+                    f_sp = tone.freq_hz * 1e-6
+                    ext_lines.append(f"v_xfg_ext_{idx+1}_%p {nout} {nin} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {f_sp:.12e} 0)")
+                ext_prefix = "\r\n".join(ext_lines)
+                self.xml_text = re.sub(
+                    r'(<CiaSpiceTmpltExprt\s+Class="CiaSpiceTmpltExprt"\s+String="&amp;ASC)(?:v_xfg_ext_.*?\r\n)*x%p\s+(?:%t1|n_xfg_raw_%p)(\s+%t2\s+%t3\s+)',
+                    lambda m: m.group(1) + ext_prefix + "\r\nx%p n_xfg_raw_%p" + m.group(2),
+                    self.xml_text,
+                    count=1,
+                    flags=re.DOTALL
+                )
+
             tones_desc = ", ".join(f"{t.freq_hz/1000.0:.1f}kHz({t.amplitude_vp}Vp)" for t in cfg.harmonics)
             self.logger.info(f"Configured XFG1 Multi-Harmonic Source [{tones_desc}] (updated={cnt})")
         return self
@@ -282,19 +300,41 @@ class MS14Document:
                 if cfg.mode.lower() == "fft":
                     fft_span_hz = max(500.0, float(cfg.fft_hz_per_div) * 10.0)
                     opt_acq_tb = min(TEK_TIME_STEPS, key=lambda s: abs(s - (25.0 / fft_span_hz)))
-                    p[6] = "0"; p[7] = str(cfg.fft_source_ch)
-                    p[8] = "1" if int(cfg.fft_source_ch) == 0 else "0"; p[9] = "1" if int(cfg.fft_source_ch) == 1 else "0"; p[10] = "0"; p[11] = "0"; p[12] = "1"
-                    p[13] = f"{opt_acq_tb:g}"; p[14] = "0"; p[15] = "1"; p[16] = "0"; p[17] = "1"; p[18] = "0"
-                    p[23] = str(cfg.fft_hz_per_div); p[24] = str(cfg.fft_center_hz)
-                    p[25] = str(cfg.fft_db_per_div); p[26] = str(cfg.fft_db_pos)
-                    p[29] = "1"; p[31] = "0"
+                    p[6] = "0"
+                    p[7] = str(cfg.fft_source_ch)
+                    p[8] = "1"
+                    p[9] = "1"
+                    p[10] = "0"
+                    p[11] = "0"
+                    p[12] = "1"
+                    p[13] = f"{opt_acq_tb:g}"
+                    p[14] = "0"
+                    p[15] = "1"
+                    p[16] = "0"
+                    p[17] = "1"
+                    p[18] = "0"
+                    p[23] = str(cfg.fft_hz_per_div)
+                    p[24] = str(cfg.fft_center_hz)
+                    p[25] = str(cfg.fft_db_per_div)
+                    p[26] = str(cfg.fft_db_pos)
+                    p[29] = "1"
+                    p[31] = "0"
                 else:
-                    p[6] = "1"; p[7] = "0"
-                    p[8] = str(cfg.ch1_on); p[9] = str(cfg.ch2_on); p[10] = str(cfg.ch3_on); p[11] = str(cfg.ch4_on); p[12] = str(cfg.math_on)
-                    p[13] = str(cfg.sec_per_div); p[14] = "0"
-                    p[15] = str(cfg.ch1_volts); p[16] = str(cfg.ch1_pos)
-                    p[17] = str(cfg.ch2_volts); p[18] = str(cfg.ch2_pos)
-                    p[29] = "1"; p[31] = "0" 
+                    p[6] = "1"
+                    p[7] = "0"
+                    p[8] = str(cfg.ch1_on)
+                    p[9] = str(cfg.ch2_on)
+                    p[10] = str(cfg.ch3_on)
+                    p[11] = str(cfg.ch4_on)
+                    p[12] = str(cfg.math_on)
+                    p[13] = str(cfg.sec_per_div)
+                    p[14] = "0"
+                    p[15] = str(cfg.ch1_volts)
+                    p[16] = str(cfg.ch1_pos)
+                    p[17] = str(cfg.ch2_volts)
+                    p[18] = str(cfg.ch2_pos)
+                    p[29] = "1"
+                    p[31] = "0"
                 new_db = "&amp;ASC" + "[]]_".join(p)
                 self.xml_text = self.xml_text[:m.start()] + m.group(1) + new_db + m.group(3) + self.xml_text[m.end():]
                 self.logger.info(f"Configured Tektronix [{cfg.name}] -> Mode={cfg.mode.upper()}")
@@ -360,8 +400,8 @@ class MS14Document:
 
         tek_configs = [
             TektronixConfig("XSC2_TimeDomain_InOut", mode="time", ch1_on=1, ch2_on=1, math_on=0, sec_per_div=f"{opt_tek_tb:g}", ch1_volts="1", ch1_pos="2", ch2_volts="1", ch2_pos="-2", menu_group_id=9),
-            TektronixConfig("XSC3_FFT_Input_CH1", mode="fft", fft_source_ch=0, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="20", fft_db_pos="0", menu_group_id=0),
-            TektronixConfig("XSC4_FFT_Output_CH2", mode="fft", fft_source_ch=1, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="20", fft_db_pos="0", menu_group_id=0)
+            TektronixConfig("XSC3_FFT_Input_CH1", mode="fft", fft_source_ch=0, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=0),
+            TektronixConfig("XSC4_FFT_Output_CH2", mode="fft", fft_source_ch=1, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=0)
         ]
         self.configure_tektronix_scopes(tek_configs, trigger_freq_hz=f_wave)
 
