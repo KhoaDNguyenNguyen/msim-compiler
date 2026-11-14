@@ -62,7 +62,7 @@ class MultisimHighOrderCompiler:
                 c_ref = f"C{c_counter}"
                 c_counter += 1
                 r_val = MS14Document.format_si(st.r1_ohm)
-                c_val = MS14Document.format_si(st.c1_farad) + "F"
+                c_val = MS14Document.format_si(st.c1_farad)
 
                 parts.append(PartPlacementSpec(r_ref, "RESISTOR_VIRTUAL", r_val, x=col_x, y=row_series_y, rotation=0))
                 parts.append(PartPlacementSpec(c_ref, "CAPACITOR_VIRTUAL", c_val, x=col_x + 36, y=row_shunt_y, rotation=90))
@@ -74,7 +74,7 @@ class MultisimHighOrderCompiler:
                 if is_last:
                     nets.append(NetConnectionSpec("VOUT", stage_out_terms))
                 gnd_terms.append((c_ref, "2"))
-                stage_summaries.append(f"Stage {s_num} (1st-Ord RC): {r_ref}={r_val}, {c_ref}={c_val}")
+                stage_summaries.append(f"Stage {s_num} (1st-Ord RC): {r_ref}={r_val}, {c_ref}={c_val}F")
                 col_x += 108
             else:
                 ra_ref = f"R{r_counter}"
@@ -88,8 +88,8 @@ class MultisimHighOrderCompiler:
 
                 ra_val = MS14Document.format_si(st.r1_ohm)
                 rb_val = MS14Document.format_si(st.r2_ohm)
-                csh_val = MS14Document.format_si(st.c1_farad) + "F"
-                cfb_val = MS14Document.format_si(st.c2_farad) + "F"
+                csh_val = MS14Document.format_si(st.c1_farad)
+                cfb_val = MS14Document.format_si(st.c2_farad)
 
                 parts.append(PartPlacementSpec(ra_ref, "RESISTOR_VIRTUAL", ra_val, x=col_x, y=row_series_y, rotation=0))
                 parts.append(PartPlacementSpec(rb_ref, "RESISTOR_VIRTUAL", rb_val, x=col_x + 90, y=row_series_y, rotation=0))
@@ -106,7 +106,7 @@ class MultisimHighOrderCompiler:
                     nets.append(NetConnectionSpec("VOUT", stage_out_terms))
                 gnd_terms.append((csh_ref, "2"))
                 biquad_buffer_specs.append((ra_ref, rb_ref, st.c1_farad))
-                stage_summaries.append(f"Stage {s_num} (Biquad Q={st.q_factor:.3f}): {ra_ref}={rb_ref}={ra_val}, {cfb_ref}={cfb_val}, {csh_ref}={csh_val}")
+                stage_summaries.append(f"Stage {s_num} (Biquad Q={st.q_factor:.3f}): {ra_ref}={rb_ref}={ra_val}, {cfb_ref}={cfb_val}F, {csh_ref}={csh_val}F")
                 col_x += 198
 
         if gnd_terms:
@@ -121,7 +121,7 @@ class MultisimHighOrderCompiler:
             )
             m_ra = ra_pat.search(builder.xml_text)
             if m_ra:
-                ra_sp = "e_in_%p n_in_%p 0 %t1 0 1.0&#xD;&#xA;r%p n_in_%p %t2 \x231&#xD;&#xA;"
+                ra_sp = "e_in_%p n_in_%p 0 %t1 0 1.0\r\nr%p n_in_%p %t2 \x231\r\n"
                 new_ra = re.sub(
                     r'(<CiaSpiceTmpltExprt\s+Class="CiaSpiceTmpltExprt"\s+String="&amp;ASC)([^"]+)(")',
                     lambda tm: tm.group(1) + ra_sp + tm.group(3),
@@ -135,7 +135,7 @@ class MultisimHighOrderCompiler:
             )
             m_rb = rb_pat.search(builder.xml_text)
             if m_rb:
-                rb_sp = f"r%p %t1 n_pls_%p \x231&#xD;&#xA;c_sk_%p n_pls_%p 0 {c1_farad:.6e}&#xD;&#xA;e_sk_%p %t2 0 n_pls_%p 0 1.0&#xD;&#xA;"
+                rb_sp = f"r%p %t1 n_pls_%p \x231\r\nc_sk_%p n_pls_%p 0 {c1_farad:.6e}\r\ne_sk_%p %t2 0 n_pls_%p 0 1.0\r\n"
                 new_rb = re.sub(
                     r'(<CiaSpiceTmpltExprt\s+Class="CiaSpiceTmpltExprt"\s+String="&amp;ASC)([^"]+)(")',
                     lambda tm: tm.group(1) + rb_sp + tm.group(3),
