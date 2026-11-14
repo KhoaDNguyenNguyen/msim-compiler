@@ -394,6 +394,29 @@ public class DbBridgeProgram {
                 }
             }
 
+            string paramDataRaw = "";
+            try {
+                string sqlParam = "SELECT TOP 1 * FROM [SYS_PARAMETER_DATA] WHERE [Component_ID] = " + compId;
+                using (System.Data.OleDb.OleDbCommand pdCmd = new System.Data.OleDb.OleDbCommand(sqlParam, conn))
+                using (System.Data.OleDb.OleDbDataReader pdr = pdCmd.ExecuteReader()) {
+                    if (pdr.Read() && pdr["Parameter_Data"] != DBNull.Value) {
+                        paramDataRaw = pdr["Parameter_Data"].ToString();
+                    }
+                }
+            } catch {}
+
+            if (string.IsNullOrEmpty(paramDataRaw)) {
+                try {
+                    string sqlVirt = "SELECT TOP 1 * FROM [SYS_VIRTUAL] WHERE [Component_ID] = " + compId;
+                    using (System.Data.OleDb.OleDbCommand vCmd = new System.Data.OleDb.OleDbCommand(sqlVirt, conn))
+                    using (System.Data.OleDb.OleDbDataReader vr = vCmd.ExecuteReader()) {
+                        if (vr.Read() && vr["Parameter_Data"] != DBNull.Value) {
+                            paramDataRaw = vr["Parameter_Data"].ToString();
+                        }
+                    }
+                } catch {}
+            }
+
             string finalPinout = !string.IsNullOrEmpty(symPinout) ? symPinout : pinout;
             StringBuilder jb = new StringBuilder();
             jb.Append("{");
@@ -413,7 +436,7 @@ public class DbBridgeProgram {
             jb.AppendFormat("\"drdoc_xml\": \"{0}\", ", EscJson(drdocXml));
             jb.AppendFormat("\"model_id\": \"{0}\", ", EscJson(modId));
             jb.AppendFormat("\"spice_template\": \"{0}\", ", EscJson(spiceTpl));
-            jb.AppendFormat("\"spice_data\": \"{0}\"", EscJson(spiceData));
+            jb.AppendFormat("\"spice_data\": \"{0}\", \"param_data\": \"{1}\"", EscJson(spiceData), EscJson(paramDataRaw));
             jb.Append("}");
             File.WriteAllText(outJsonPath, jb.ToString(), Encoding.UTF8);
         }
