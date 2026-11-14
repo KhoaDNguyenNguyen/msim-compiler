@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dll
+*.exe
+*.ms14
+*.xml
+*.json
+dist/
+build/
+*.egg-info/
+*.whl
+flattened_workspace/
+flatten.py
+multemp.zsh
+all_code_context.txt
