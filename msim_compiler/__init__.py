@@ -1,4 +1,6 @@
 from .logger import get_logger
+from .config_registry import EDAConfigRegistry, GLOBAL_CONFIG, GridRoutingConfig, SimulationProfileSpec
+from .dom_engine import MultisimDOMManipulator, UniversalNetGraph, UniversalPinNode
 from .models import (
     BiquadStageSpec,
     BodeConfig,
@@ -16,6 +18,14 @@ from .filter_synthesizer import HighOrderButterworthSynthesizer
 from .document import MS14Document
 from .compiler import MultisimHighOrderCompiler
 from .batch_compiler import CircuitBatchCompiler
+from .vision_parser import OpticalCircuitParser
+from .synthesizers import (
+    ButterworthFilterPlugin,
+    ICircuitSynthesizer,
+    RLCLadderBJTPlugin,
+    SynthesizedTopologyPlan,
+    SynthesizerRegistry
+)
 from .eda_engine import (
     GRID_PITCH,
     AffineGrid2D,
@@ -35,6 +45,13 @@ from .schematic_builder import (
 
 __all__ = [
     "get_logger",
+    "EDAConfigRegistry",
+    "GLOBAL_CONFIG",
+    "GridRoutingConfig",
+    "SimulationProfileSpec",
+    "MultisimDOMManipulator",
+    "UniversalNetGraph",
+    "UniversalPinNode",
     "BiquadStageSpec",
     "BodeConfig",
     "ComponentSpec",
@@ -50,6 +67,12 @@ __all__ = [
     "MS14Document",
     "MultisimHighOrderCompiler",
     "CircuitBatchCompiler",
+    "OpticalCircuitParser",
+    "ButterworthFilterPlugin",
+    "ICircuitSynthesizer",
+    "RLCLadderBJTPlugin",
+    "SynthesizedTopologyPlan",
+    "SynthesizerRegistry",
     "GRID_PITCH",
     "AffineGrid2D",
     "NativeEDAEngine",
