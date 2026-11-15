@@ -53,3 +53,7 @@ The `msim_compiler` synthesizer generates native NI Multisim 14 (`.ms14`) binary
   1. **SPICE Prefix Audit**: Verifies every `C*` uses `c%p`, `L*` uses `l%p`, `R*` uses `r%p`, `D*` uses `d%p`, and `Q*` uses `q%p`.
   2. **Virtual Connector Consistency Audit**: Verifies all 4 DOM attributes of every `<CVirtualConnector>` match its connected `<CiNode>`.
   3. **Net Isolation Audit**: Verifies that `VIN`, `VOUT`, and `0` share zero common `<CiPort>` IDs.
+
+### ADR-06: Topology-Aware & Parameterized Multi-Tone Harmonic Injection (Bug 1.3 Fix)
+* **Decision**: Eliminate the hardcoded `if lname in ("&ASCR1", "&ASCR10"):` target hijack in `MultisimDOMManipulator.configure_xfg1_harmonics_dom()`. Expose `injection_target: Optional[str] = None` across `FuncGenConfig`, `MS14Document.configure_function_generator()`, and `MS14Document.auto_tune_all_instruments()`. When `injection_target` is not explicitly specified, the DOM engine inspects `<CiNode LocalName="&ASCVIN"><Ports>` and `<CiPort>` bindings to identify the exact circuit component and pin (`%t{pin_name}`) physically wired to `VIN`.
+* **Rationale**: Prevents load resistors named `R1` or `R10` located at `VOUT` (such as in LC Pi or T filters) from being hijacked by `v_harm_*` sources, which previously caused an AC short-circuit (`0 dB` flat response on the Bode Plotter) between `VGEN` and `VOUT`, and supports arbitrary user-defined component naming and pin rotations.

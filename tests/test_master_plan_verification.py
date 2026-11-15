@@ -190,56 +190,57 @@ def test_phase4_pre_flight_negative_gate() -> None:
     assert caught_spice_mismatch, "Pre-Flight Gate failed to block SPICE archetype mismatch on C1"
 
 def test_phase5_vision_ocr_morphological_opening() -> None:
-    logger.info("=== [TEST 5/6] Phase 5: Vision OCR Morphological Opening & Blank-Image Rejection ===")
+    logger.info("=== [TEST 5/7] Phase 5: Vision OCR Morphological Opening & Blank-Image Rejection ===")
     parser = OpticalCircuitParser()
-    sample_png = os.path.join("dist", "verify_vision_synthetic.png")
-    OpticalCircuitParser.generate_synthetic_schematic_png(sample_png)
-    parts, nets = parser.parse_image_to_topology(sample_png)
-    assert len(parts) == 8, f"Expected 8 morphologically extracted components from synthetic PNG, got {len(parts)}"
-    logger.info(f"Verified Morphological OCR extracted {len(parts)} components and {len(nets)} nets from '{os.path.basename(sample_png)}'")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sample_png = os.path.join(tmp_dir, "verify_vision_synthetic.png")
+        OpticalCircuitParser.generate_synthetic_schematic_png(sample_png)
+        parts, nets = parser.parse_image_to_topology(sample_png)
+        assert len(parts) == 8, f"Expected 8 morphologically extracted components from synthetic PNG, got {len(parts)}"
+        logger.info(f"Verified Morphological OCR extracted {len(parts)} components and {len(nets)} nets from '{os.path.basename(sample_png)}'")
 
-    custom_png = os.path.join("dist", "verify_vision_custom_4comp.png")
-    width, height = 600, 400
-    canvas = [[255 for _ in range(width)] for _ in range(height)]
-    for bx0, by0, bx1, by1 in [(120, 175, 180, 195), (280, 175, 340, 195), (220, 250, 240, 310), (380, 250, 400, 310)]:
-        for yy in range(by0, by1 + 1):
-            for xx in range(bx0, bx1 + 1):
-                canvas[yy][xx] = 15
+        custom_png = os.path.join(tmp_dir, "verify_vision_custom_4comp.png")
+        width, height = 600, 400
+        canvas = [[255 for _ in range(width)] for _ in range(height)]
+        for bx0, by0, bx1, by1 in [(120, 175, 180, 195), (280, 175, 340, 195), (220, 250, 240, 310), (380, 250, 400, 310)]:
+            for yy in range(by0, by1 + 1):
+                for xx in range(bx0, bx1 + 1):
+                    canvas[yy][xx] = 15
 
-    raw_rows = bytearray()
-    for row in canvas:
-        raw_rows.append(0)
-        for pix in row:
-            raw_rows.extend((pix, pix, pix))
-    def png_chunk(c_type: bytes, c_data: bytes) -> bytes:
-        crc = zlib.crc32(c_type + c_data) & 0xFFFFFFFF
-        return struct.pack(">I", len(c_data)) + c_type + c_data + struct.pack(">I", crc)
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    idat = zlib.compress(bytes(raw_rows), level=6)
-    with open(custom_png, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b""))
+        raw_rows = bytearray()
+        for row in canvas:
+            raw_rows.append(0)
+            for pix in row:
+                raw_rows.extend((pix, pix, pix))
+        def png_chunk(c_type: bytes, c_data: bytes) -> bytes:
+            crc = zlib.crc32(c_type + c_data) & 0xFFFFFFFF
+            return struct.pack(">I", len(c_data)) + c_type + c_data + struct.pack(">I", crc)
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        idat = zlib.compress(bytes(raw_rows), level=6)
+        with open(custom_png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b""))
 
-    c_parts, c_nets = parser.parse_image_to_topology(custom_png)
-    assert len(c_parts) == 4, f"Expected 4 components from custom 4-component image, got {len(c_parts)}"
-    logger.info(f"Verified custom 4-component schematic extracted {len(c_parts)} components (proving 0 hardcoded fallback)")
+        c_parts, c_nets = parser.parse_image_to_topology(custom_png)
+        assert len(c_parts) == 4, f"Expected 4 components from custom 4-component image, got {len(c_parts)}"
+        logger.info(f"Verified custom 4-component schematic extracted {len(c_parts)} components (proving 0 hardcoded fallback)")
 
-    blank_png = os.path.join("dist", "verify_vision_blank.png")
-    blank_rows = bytearray()
-    for _ in range(200):
-        blank_rows.append(0)
-        blank_rows.extend([255] * (300 * 3))
-    ihdr_b = struct.pack(">IIBBBBB", 300, 200, 8, 2, 0, 0, 0)
-    idat_b = zlib.compress(bytes(blank_rows), level=6)
-    with open(blank_png, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr_b) + png_chunk(b"IDAT", idat_b) + png_chunk(b"IEND", b""))
+        blank_png = os.path.join(tmp_dir, "verify_vision_blank.png")
+        blank_rows = bytearray()
+        for _ in range(200):
+            blank_rows.append(0)
+            blank_rows.extend([255] * (300 * 3))
+        ihdr_b = struct.pack(">IIBBBBB", 300, 200, 8, 2, 0, 0, 0)
+        idat_b = zlib.compress(bytes(blank_rows), level=6)
+        with open(blank_png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr_b) + png_chunk(b"IDAT", idat_b) + png_chunk(b"IEND", b""))
 
-    caught_blank = False
-    try:
-        parser.parse_image_to_topology(blank_png)
-    except ValueError as ex:
-        caught_blank = True
-        logger.info(f"  [DEFENSIVE-OCR-OK] Blank image cleanly raised ValueError: {ex}")
-    assert caught_blank, "Expected ValueError on blank schematic image"
+        caught_blank = False
+        try:
+            parser.parse_image_to_topology(blank_png)
+        except ValueError as ex:
+            caught_blank = True
+            logger.info(f"  [DEFENSIVE-OCR-OK] Blank image cleanly raised ValueError: {ex}")
+        assert caught_blank, "Expected ValueError on blank schematic image"
 
 def test_phase6_end_to_end_filter_and_rlc_synthesis() -> None:
     logger.info("=== [TEST 6/6] Phase 6: End-to-End High-Order Filter & RLC-BJT Matrix Compilation ===")
@@ -259,6 +260,78 @@ def test_phase6_end_to_end_filter_and_rlc_synthesis() -> None:
     assert len(comps) >= 15, f"Expected >= 15 components in 7th-order Butterworth, got {len(comps)}"
     logger.info(f"Verified 7th-Order Butterworth compilation: {len(comps)} components, {len(doc.discover_wires())} wires")
 
+def test_phase7_multitone_injection_isolation_lc_pi_filter() -> None:
+    logger.info("=== [TEST 7/7] Phase 7: Bug 1.3 Fix - LC Pi Filter Multi-Tone Injection Isolation (R1 at VOUT) ===")
+    builder = MultisimSchematicBuilder.from_testbench()
+    parts = [
+        PartPlacementSpec("L1", "INDUCTOR_VIRTUAL", "10mH", x=414, y=243, rotation=0),
+        PartPlacementSpec("C1", "CAPACITOR_VIRTUAL", "47nF", x=360, y=315, rotation=90),
+        PartPlacementSpec("C2", "CAPACITOR_VIRTUAL", "47nF", x=504, y=315, rotation=90),
+        PartPlacementSpec("R1", "RESISTOR_VIRTUAL", "1k", x=612, y=315, rotation=90)
+    ]
+    nets = [
+        NetConnectionSpec("VIN", [("L1", "1"), ("C1", "1")]),
+        NetConnectionSpec("VOUT", [("L1", "2"), ("C2", "1"), ("R1", "1")]),
+        NetConnectionSpec("0", [("C1", "2"), ("C2", "2"), ("R1", "2")])
+    ]
+    builder.synthesize_topology(parts=parts, nets=nets, auto_place=False)
+    doc = MS14Document(codec=builder.codec)
+    doc.xml_text = builder.xml_text
+    doc.auto_tune_all_instruments(
+        fc_hz=5000.0,
+        fundamental_hz=1000.0,
+        harmonics=[
+            HarmonicTone(freq_hz=1000.0, amplitude_vp=1.4),
+            HarmonicTone(freq_hz=5000.0, amplitude_vp=0.8),
+            HarmonicTone(freq_hz=9000.0, amplitude_vp=0.5)
+        ]
+    )
+
+    root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(doc.xml_text)
+    r1_tpl = ""
+    l1_tpl = ""
+    c1_tpl = ""
+    for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
+        comp = item.find("CiComponent")
+        if comp is None:
+            continue
+        lname = comp.attrib.get("LocalName", "")
+        exprt = comp.find(".//CiaSpiceTmpltExprt")
+        s_val = exprt.attrib.get("String", "") if exprt is not None else ""
+        if lname == "&ASCR1":
+            r1_tpl = s_val
+        elif lname == "&ASCL1":
+            l1_tpl = s_val
+        elif lname == "&ASCC1":
+            c1_tpl = s_val
+
+    assert "v_harm_" not in r1_tpl, f"Bug 1.3 Regression: Load resistor R1 at VOUT was hijacked with v_harm_ sources: {r1_tpl}"
+    assert ("v_harm_" in l1_tpl) or ("v_harm_" in c1_tpl), f"Expected VIN-connected component (L1 or C1) to receive v_harm_ bridge, got L1='{l1_tpl}', C1='{c1_tpl}'"
+    logger.info(f"  [BUG-1.3-ISOLATED-OK] Load resistor R1 at VOUT is 100% untouched ('{r1_tpl[4:]}'); VIN bridge injected into L1/C1")
+
+    doc_explicit = MS14Document(codec=builder.codec)
+    doc_explicit.xml_text = builder.xml_text
+    doc_explicit.auto_tune_all_instruments(
+        fc_hz=5000.0,
+        fundamental_hz=1000.0,
+        harmonics=[
+            HarmonicTone(freq_hz=1000.0, amplitude_vp=1.4),
+            HarmonicTone(freq_hz=5000.0, amplitude_vp=0.8)
+        ],
+        injection_target="C1"
+    )
+    root_exp = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(doc_explicit.xml_text)
+    for item in root_exp.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
+        comp = item.find("CiComponent")
+        if comp is not None and comp.attrib.get("LocalName") == "&ASCC1":
+            c1_exp_tpl = comp.find(".//CiaSpiceTmpltExprt").attrib.get("String", "")
+            assert "v_harm_1" in c1_exp_tpl, f"Explicit injection_target='C1' failed: {c1_exp_tpl}"
+            logger.info(f"  [PARAM-TARGET-OK] Explicit injection_target='C1' verified: '{c1_exp_tpl[4:]}'")
+
+    out_pi = os.path.join("dist", "Verify_LCPiFilter_R1_At_VOUT.ms14")
+    doc.save(out_pi)
+    logger.info(f"Saved verified LC Pi Filter schematic -> '{out_pi}'")
+
 def run_all_verifications() -> None:
     test_phase1_zero_tempfile_db_bridge()
     test_phase2_component_dom_builder_no_archetypes()
@@ -266,7 +339,8 @@ def run_all_verifications() -> None:
     test_phase4_pre_flight_negative_gate()
     test_phase5_vision_ocr_morphological_opening()
     test_phase6_end_to_end_filter_and_rlc_synthesis()
-    logger.info("ALL 6 MASTER PLAN VERIFICATION GATES PASSED SUCCESSFULLY.")
+    test_phase7_multitone_injection_isolation_lc_pi_filter()
+    logger.info("ALL 7 MASTER PLAN VERIFICATION GATES PASSED SUCCESSFULLY.")
 
 if __name__ == "__main__":
     run_all_verifications()
