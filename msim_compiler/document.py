@@ -1,3 +1,4 @@
+from .dom_engine import MultisimDOMManipulator
 import math
 import os
 import re
@@ -206,54 +207,15 @@ class MS14Document:
         self.set_cdata_key("NI_EWB_DEPUTY_CYCLE_VALUE", f"{cfg.duty_cycle:g}")
         self.set_cdata_key("NI_EWB_AMPLITUDE_VALUE", f"{cfg.amplitude_vp:g}")
         self.set_cdata_key("NI_EWB_OFFSET_VALUE", f"{cfg.offset_v:g}")
-
-        if not cfg.harmonics:
-            f_spice = cfg.freq_hz * 1e-6
-            self.xml_text, _ = re.subn(
-                r'(sin\([0-9.eE+-]+\s+)[0-9.eE+-]+(\s+)[0-9.eE+-]+(\s+0\))',
-                rf'\g<1>{cfg.amplitude_vp:.18e}\g<2>{f_spice:.18e}\g<3>',
-                self.xml_text
-            )
-        else:
-            pos_lines: List[str] = []
-            neg_lines: List[str] = []
-            n_tones = len(cfg.harmonics)
-            for idx, tone in enumerate(cfg.harmonics):
-                p_in = "3" if idx == 0 else f"n_hp_{idx}"
-                p_out = "2" if idx == n_tones - 1 else f"n_hp_{idx+1}"
-                n_in = "2" if idx == 0 else f"n_hn_{idx}"
-                n_out = "1" if idx == n_tones - 1 else f"n_hn_{idx+1}"
-                ac_mag = cfg.amplitude_vp if idx == 0 else 0.0
-                f_sp = tone.freq_hz * 1e-6
-                pos_lines.append(f"vfgen_pos_{idx+1} {p_in} {p_out} dc 0.000000e+00 ac {ac_mag:.18e} sin(0.000000000000000000e+00 {tone.amplitude_vp:.18e} {f_sp:.18e} 0)")
-                neg_lines.append(f"vfgen_neg_{idx+1} {n_in} {n_out} dc 0.000000e+00 ac {ac_mag:.18e} sin(0.000000000000000000e+00 {tone.amplitude_vp:.18e} {f_sp:.18e} 0)")
-
-            subckt_body = "\r\n".join(pos_lines + neg_lines)
-            self.xml_text, cnt = re.subn(
-                r'(&amp;ASC\.subckt\s+XXFG1_\d+\s+1\s+2\s+3\s+).*?(\s*\.ends)',
-                lambda m: m.group(1) + "\r\n" + subckt_body + "\r\n" + m.group(2),
-                self.xml_text, flags=re.DOTALL
-            )
-
-            if len(cfg.harmonics) > 1:
-                extra_tones = cfg.harmonics[1:]
-                ext_lines: List[str] = []
-                for idx, tone in enumerate(extra_tones):
-                    nin = "n_xfg_raw_%p" if idx == 0 else f"n_xfg_h{idx}_%p"
-                    nout = "%t1" if idx == len(extra_tones) - 1 else f"n_xfg_h{idx+1}_%p"
-                    f_sp = tone.freq_hz * 1e-6
-                    ext_lines.append(f"v_xfg_ext_{idx+1}_%p {nout} {nin} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {f_sp:.12e} 0)")
-                ext_prefix = "\r\n".join(ext_lines)
-                self.xml_text = re.sub(
-                    r'(<CiaSpiceTmpltExprt\s+Class="CiaSpiceTmpltExprt"\s+String="&amp;ASC)(?:v_xfg_ext_.*?\r\n)*x%p\s+(?:%t1|n_xfg_raw_%p)(\s+%t2\s+%t3\s+)',
-                    lambda m: m.group(1) + ext_prefix + "\r\nx%p n_xfg_raw_%p" + m.group(2),
-                    self.xml_text,
-                    count=1,
-                    flags=re.DOTALL
-                )
-
+        self.xml_text = MultisimDOMManipulator.configure_xfg1_harmonics_dom(
+            self.xml_text,
+            freq_hz=cfg.freq_hz,
+            amplitude_vp=cfg.amplitude_vp,
+            harmonics=cfg.harmonics or []
+        )
+        if cfg.harmonics:
             tones_desc = ", ".join(f"{t.freq_hz/1000.0:.1f}kHz({t.amplitude_vp}Vp)" for t in cfg.harmonics)
-            self.logger.info(f"Configured XFG1 Multi-Harmonic Source [{tones_desc}] (updated={cnt})")
+            self.logger.info(f"Configured XFG1 Multi-Harmonic Source via DOM [{tones_desc}]")
         return self
 
     def configure_oscilloscope(self, cfg: ScopeConfig) -> "MS14Document":
@@ -269,6 +231,9 @@ class MS14Document:
         self.set_cdata_key("NI_EWB_B_CHANNEL_SCALE_VALUE", f"{cfg.ch_b_scale_v:g}")
         self.set_cdata_key("NI_EWB_B_CHANNEL_POSITION_VALUE", f"{cfg.ch_b_pos:g}")
         self.set_cdata_key("NI_EWB_TRIGGERBASE_TRIGGER_MODE", str(cfg.trigger_mode))
+        self.set_cdata_key("NI_EWB_REVERSE_MODE", "1")
+        self.set_cdata_key("NI_EWB_O_REVERSE_MODE", "1")
+        self.set_cdata_key("NI_EWB_BACKGROUND_MODE", "1")
         return self
 
     def configure_bode_plotter(self, cfg: BodeConfig) -> "MS14Document":
@@ -280,6 +245,8 @@ class MS14Document:
         self.set_cdata_key("NI_EWB_VERT_INITIAL_LOG_VALUE", f"{cfg.db_min:g}")
         self.set_cdata_key("NI_EWB_VERT_FINAL_LOG_VALUE", f"{cfg.db_max:g}")
         self.set_cdata_key("NI_EWB_CURRENT_DISPLAY_CURSOR_POS_0", f"{cfg.cursor_freq_hz:.2f}")
+        self.set_cdata_key("NI_EWB_CURRENT_DISPLAY_CURSOR_POS_1", f"{cfg.cursor_freq_hz:.2f}")
+        self.set_cdata_key("NI_EWB_BODE_REVERSE_MODE", "1")
         return self
 
     def configure_tektronix_scopes(self, configs: List[TektronixConfig], trigger_freq_hz: float = 1000.0) -> "MS14Document":
@@ -321,14 +288,6 @@ class MS14Document:
             nblk = set_local_key(nblk, "NI_EWB_TKSCOPE_TRIGGERFREQUENCY", f"{trigger_freq_hz:.2f}")
             nblk = set_local_key(nblk, "NI_EWB_CURRENTMENUGROUPID", "9")
             nblk = set_local_key(nblk, "NI_EWB_CURRENTMEASUREBTID", "0")
-            nblk = re.sub(
-                r'<Element\s+Key="&amp;ASCNI_EWB_SETUPDATALIST">.*?</Elements>\s*</CDataElement>\s*</Element>',
-                empty_setup_list,
-                nblk,
-                count=1,
-                flags=re.DOTALL
-            )
-
             if cfg.mode.lower() == "fft":
                 nblk = set_local_key(nblk, "NI_EWB_PRESELECTEDMATHGROUP", "4")
                 nblk = set_local_key(nblk, "NI_EWB_SELCHANNELID", "4")
@@ -422,13 +381,25 @@ class MS14Document:
         harmonics: Optional[List[HarmonicTone]] = None,
         vim_vp: float = 1.4
     ) -> "MS14Document":
+        label_map = {
+            "XSC1": "XSC1 (Time Scope)",
+            "XSC2": "XSC2 (Time Domain)",
+            "XSC3": "XSC3 (FFT Input)",
+            "XSC4": "XSC4 (FFT Output)",
+        }
+        for old_lbl, new_lbl in label_map.items():
+            self.xml_text = re.sub(
+                r'(<CIITSymTextCompName\b[^>]*Output="&amp;ASC)' + old_lbl + r'(")',
+                rf'\g<1>{new_lbl}\g<2>',
+                self.xml_text
+            )
         f_wave = fundamental_hz or fc_hz
         raw_tb = (3.0 / float(f_wave)) / 10.0
         opt_scope_tb = min(SCOPE_125_STEPS, key=lambda s: abs(math.log10(s / raw_tb)))
         opt_tek_tb = min(TEK_TIME_STEPS, key=lambda s: abs(math.log10(s / raw_tb)))
 
         max_f = max([t.freq_hz for t in harmonics], default=fc_hz * 2.5) if harmonics else fc_hz * 2.5
-        raw_fft_step = float(max_f) / 7.5
+        raw_fft_step = float(max_f) / 6.0 if (harmonics and len(harmonics) > 1) else float(f_wave) / 5.0
         opt_fft_hz = min(TEK_FFT_HZ_STEPS, key=lambda s: abs(math.log10(s / max(10.0, raw_fft_step))))
         opt_fft_center = opt_fft_hz * 5
 
