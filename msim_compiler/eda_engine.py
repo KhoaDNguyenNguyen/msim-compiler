@@ -1,3 +1,4 @@
+from collections import Counter
 import os
 import re
 import math
@@ -152,6 +153,7 @@ class NativeEDAEngine:
         self.net_name_to_id: Dict[str, int] = {}
         self.routed_trees: Dict[str, Set[Tuple[int, int]]] = {}
         self.component_boxes: Dict[str, Tuple[int, int, int, int]] = {}
+        self.pin_grid_cells: Set[Tuple[int, int]] = set()
         self._dll = self._load_native_dll()
 
     def _load_native_dll(self) -> Optional[ctypes.CDLL]:
@@ -235,6 +237,7 @@ class NativeEDAEngine:
         self.net_name_to_id.clear()
         self.routed_trees.clear()
         self.component_boxes.clear()
+        self.pin_grid_cells.clear()
 
     def _get_net_id(self, net_name: str) -> int:
         if net_name not in self.net_name_to_id:
@@ -273,9 +276,12 @@ class NativeEDAEngine:
                 cy = gpy + (gly - gpy) * s // steps
                 if 0 <= cx < self.grid_w and 0 <= cy < self.grid_h:
                     self.obstacle_grid[cy * self.grid_w + cx] = 0
+            self.pin_grid_cells.add((gpx, gpy))
 
     def _is_grid_point_free(self, gx: int, gy: int) -> bool:
         if not (0 <= gx < self.grid_w and 0 <= gy < self.grid_h):
+            return False
+        if (gx, gy) in self.pin_grid_cells:
             return False
         return self.obstacle_grid[gy * self.grid_w + gx] == 0
 
@@ -358,21 +364,41 @@ class NativeEDAEngine:
 
         horiz_leads = [t[3] for t in terminals if t[4] != t[2]]
         if horiz_leads:
-            spine_y = min(horiz_leads)
+            y_counts = Counter(horiz_leads)
+            med_y = sorted(t[3] for t in terminals)[len(terminals) // 2]
+            spine_y = max(y_counts.keys(), key=lambda y_val: (y_counts[y_val], -abs(y_val - med_y)))
         else:
             spine_y = AffineGrid2D.snap9(min(t[3] for t in terminals) - 18)
 
         by_col_sig: Dict[int, List[Tuple[str, str, int, int, int, int]]] = {}
         for t in terminals:
-            by_col_sig.setdefault(t[2], []).append(t)
+            eff_x = t[4] if (t[4] != t[2] and not t[0].startswith("__VCONN_")) else t[2]
+            by_col_sig.setdefault(eff_x, []).append(t)
         sorted_sig_cols = sorted(by_col_sig.keys())
 
-        if len(sorted_sig_cols) >= 3:
+        if len(sorted_sig_cols) >= 1:
             sig_reps: List[Tuple[str, str]] = []
             for idx, col_x in enumerate(sorted_sig_cols):
                 col_t = by_col_sig[col_x]
                 is_internal = (0 < idx < len(sorted_sig_cols) - 1)
-                if is_internal or len(col_t) >= 2:
+                horiz_in_col = [t for t in col_t if t[4] != t[2]]
+                if len(horiz_in_col) >= 3 and len({t[3] for t in horiz_in_col}) >= 3:
+                    col_t_sorted = sorted(col_t, key=lambda item: item[3])
+                    j_ids: List[str] = []
+                    for r_i in range(len(col_t_sorted) - 1):
+                        t_cur = col_t_sorted[r_i]
+                        jx, jy = self._find_nearest_free_junction(col_x, t_cur[3], pin_coords)
+                        pin_coords.add((jx, jy))
+                        j_id = f"__J_{net_name}_{idx}_{r_i}__"
+                        plan.junctions.append((j_id, jx, jy))
+                        plan.point_to_point_edges.append(((t_cur[0], t_cur[1]), (j_id, "J")))
+                        if j_ids:
+                            plan.point_to_point_edges.append(((j_ids[-1], "J"), (j_id, "J")))
+                        j_ids.append(j_id)
+                    last_t = col_t_sorted[-1]
+                    plan.point_to_point_edges.append(((j_ids[-1], "J"), (last_t[0], last_t[1])))
+                    sig_reps.append((j_ids[0], "J"))
+                elif is_internal or len(col_t) >= 2:
                     jx, jy = self._find_nearest_free_junction(col_x, spine_y, pin_coords)
                     pin_coords.add((jx, jy))
                     j_id = f"__J_{net_name}_{idx}__"
@@ -414,8 +440,9 @@ class NativeEDAEngine:
             if not (0 <= cx < self.grid_w and 0 <= cy < self.grid_h):
                 return False
             cell = cy * self.grid_w + cx
-            if (cx, cy) not in allow_endpoints and self.obstacle_grid[cell] > 0:
-                return False
+            if (cx, cy) not in allow_endpoints:
+                if self.obstacle_grid[cell] > 0 or (cx, cy) in self.pin_grid_cells:
+                    return False
             owner = self.net_owner_grid[cell]
             if owner > 0 and owner != net_id:
                 if s == 0 or s == steps:
@@ -444,24 +471,26 @@ class NativeEDAEngine:
         dx1, dy1 = slx - sx, sly - sy
         dx2, dy2 = tlx - tx, tly - ty
 
-        if sy == ty and (dx1 == 0 or (tx - sx) * dx1 >= 0) and (dx2 == 0 or (sx - tx) * dx2 >= 0):
+        if sy == ty and dy1 == 0 and dy2 == 0 and (dx1 == 0 or (tx - sx) * dx1 > 0) and (dx2 == 0 or (sx - tx) * dx2 > 0):
             if self._is_grid_segment_clear(sx, sy, tx, ty, net_id, allowed):
                 return [(sx, sy), (tx, ty)]
 
-        if sx == tx and (dy1 == 0 or (ty - sy) * dy1 >= 0) and (dy2 == 0 or (sy - ty) * dy2 >= 0):
+        if sx == tx and dx1 == 0 and dx2 == 0 and (dy1 == 0 or (ty - sy) * dy1 > 0) and (dy2 == 0 or (sy - ty) * dy2 > 0):
             if self._is_grid_segment_clear(sx, sy, tx, ty, net_id, allowed):
                 return [(sx, sy), (tx, ty)]
 
         candidates: List[List[Tuple[int, int]]] = []
 
         c1_x, c1_y = tx, sy
-        if ((dx1 == 0 and dy1 == 0) or ((c1_x - sx) * dx1 >= 0 and (c1_y - sy) * dy1 >= 0)) and \
-           ((dx2 == 0 and dy2 == 0) or ((c1_x - tx) * dx2 >= 0 and (c1_y - ty) * dy2 >= 0)):
+        s1_ok = (dx1 == 0 and dy1 == 0) or (dx1 != 0 and dy1 == 0 and (c1_x - sx) * dx1 > 0)
+        t1_ok = (dx2 == 0 and dy2 == 0) or (dx2 == 0 and dy2 != 0 and (c1_y - ty) * dy2 > 0)
+        if s1_ok and t1_ok:
             candidates.append([(sx, sy), (c1_x, c1_y), (tx, ty)])
 
         c2_x, c2_y = sx, ty
-        if ((dx1 == 0 and dy1 == 0) or ((c2_x - sx) * dx1 >= 0 and (c2_y - sy) * dy1 >= 0)) and \
-           ((dx2 == 0 and dy2 == 0) or ((c2_x - tx) * dx2 >= 0 and (c2_y - ty) * dy2 >= 0)):
+        s2_ok = (dx1 == 0 and dy1 == 0) or (dx1 == 0 and dy1 != 0 and (c2_y - sy) * dy1 > 0)
+        t2_ok = (dx2 == 0 and dy2 == 0) or (dx2 != 0 and dy2 == 0 and (c2_x - tx) * dx2 > 0)
+        if s2_ok and t2_ok:
             candidates.append([(sx, sy), (c2_x, c2_y), (tx, ty)])
 
         candidates.append([(sx, sy), (slx, sly), (tlx, sly), (tlx, tly), (tx, ty)])
@@ -474,6 +503,14 @@ class NativeEDAEngine:
 
         for cand in candidates:
             clean = AffineGrid2D.simplify_orthogonal_polyline(cand)
+            if len(clean) >= 2 and (dx1 != 0 or dy1 != 0):
+                fx, fy = clean[1][0] - sx, clean[1][1] - sy
+                if fx * dx1 + fy * dy1 <= 0:
+                    continue
+            if len(clean) >= 2 and (dx2 != 0 or dy2 != 0):
+                lx_v, ly_v = clean[-2][0] - tx, clean[-2][1] - ty
+                if lx_v * dx2 + ly_v * dy2 <= 0:
+                    continue
             ok = True
             for i in range(len(clean) - 1):
                 if not self._is_grid_segment_clear(clean[i][0], clean[i][1], clean[i + 1][0], clean[i + 1][1], net_id, allowed):
