@@ -1,3 +1,4 @@
+from .dom_engine import MultisimDOMManipulator
 import os
 import re
 import uuid
@@ -724,17 +725,17 @@ class MultisimSchematicBuilder:
 
         def get_shift_for_item(iid: str) -> Tuple[int, int]:
             if in_island(iid, xbp1_island):
-                return (-72, -117)
+                return (-72, -99)
             if in_island(iid, xfg1_island):
                 return (-72, -63)
             if in_island(iid, xsc2_island):
                 return (-99, 0)
             if in_island(iid, xsc3_island):
-                return (-45, -72)
+                return (-45, -54)
             if in_island(iid, xsc4_island):
-                return (-45, -135)
+                return (-45, -117)
             if in_island(iid, xsc1_island):
-                return (162, -369)
+                return (162, -351)
             return (0, 0)
 
         vin_group = {"490443664", "490441000", "490440208", "490444096", "490442944", "490441864"}
@@ -925,18 +926,14 @@ class MultisimSchematicBuilder:
         if os.path.exists(tek_ref_ms14):
             try:
                 t_root = ET.fromstring(self.codec.decode_to_string(tek_ref_ms14).encode("utf-8"))
-                t_idata = t_root.find(".//InstrumentsData/CSourceSymbolCollectNode/InstrumentData")
+                t_idata = None
+                for cnode_cand in t_root.findall(".//InstrumentsData/CSourceSymbolCollectNode"):
+                    if "XSC" in cnode_cand.attrib.get("CompLongName", ""):
+                        cand_id = cnode_cand.find("InstrumentData")
+                        if cand_id is not None and cand_id.find(".//Element[@Key='&ASCNI_EWB_TKSCOPE_DATAOBJECTS']") is not None:
+                            t_idata = cand_id
+                            break
                 if t_idata is not None:
-                    t_elems = t_idata.find(".//Element[@Key='&ASCNI_EWB_TKSCOPE_DATAOBJECTS']/CDataElement/Elements")
-                    if t_elems is not None:
-                        for item_cde in t_elems.findall("CDataElement"):
-                            mdata = item_cde.find("CDataElementMap/MapData")
-                            if mdata is not None:
-                                id_el = mdata.find("Element[@Key='&ASCNI_EWB_TKSCOPE_ID']/CDataElement")
-                                if (id_el.attrib.get("Data", "") if id_el is not None else "") not in ("5", "6"):
-                                    data_el = mdata.find("Element[@Key='&ASCNI_EWB_TKSCOPE_DATA']")
-                                    if data_el is not None:
-                                        mdata.remove(data_el)
                     clean_tek_idata_xml = ET.tostring(t_idata, encoding="unicode")
             except Exception:
                 clean_tek_idata_xml = None
@@ -970,7 +967,12 @@ class MultisimSchematicBuilder:
                     elif any(tk in cname for tk in ("XSC2", "XSC3", "XSC4")):
                         if clean_tek_idata_xml is not None:
                             cnode.remove(idata)
-                            cnode.append(ET.fromstring(clean_tek_idata_xml.encode("utf-8")))
+                            tek_root = ET.fromstring(clean_tek_idata_xml.encode("utf-8"))
+                            for el in tek_root.findall(".//Element"):
+                                if "REV" in el.attrib.get("Key","") or "BACK" in el.attrib.get("Key",""):
+                                    cde = el.find("CDataElement")
+                                    if cde is not None: cde.set("Data", "1")
+                            cnode.append(tek_root)
                 return ET.tostring(i_root, encoding="unicode")
             except Exception:
                 return inst_xml
@@ -1246,7 +1248,7 @@ class MultisimSchematicBuilder:
                 f'<CIITPinSymTextCompNumber Class="CIITPinSymTextCompNumber" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" Output="&amp;ASC{p_spec.number}" Rotation="0" Position="0" Font-Height="-9" Font-Width="0" Font-Escapement="0" Font-Orientation="0" Font-Weight="400" Font-Italic="0" Font-Underline="0" Font-StrikeOut="0" Font-CharSet="0" Font-OutPrecision="3" Font-ClipPrecision="2" Font-Quality="1" Font-PitchAndFamily="34" Font-FaceName="&amp;ASCCourier New" Transformer-M00="1" Transformer-M01="0" Transformer-M10="0" Transformer-M11="1" Transformer-M20="{numx}" Transformer-M21="{numy}" Hidden="0"/>\n'
                 f'</Item>\n'
                 f'<Item ID="{pline_id}" Class="CODLineComp">\n'
-                f'<CODLineComp Class="CODLineComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" ArrowAtSource="0" ArrowAtTarget="0" pt0X="{lx0}" pt0Y="{ly0}" pt1X="{lx1}" pt1Y="{ly1}" PenColor="0" FgColor="0" BgColor="16777215" Pen-Style="0" Pen-Width="0" Pen-Color="0" Hidden="0"/>\n'
+                f'<CODLineComp Class="CODLineComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" ArrowAtSource="0" ArrowAtTarget="0" pt0X="{lx0}" pt0Y="{ly0}" pt1X="{lx1}" pt1Y="{ly1}" PenColor="0" FgColor="0" BgColor="16777215" Pen-Style="0" Pen-Width="1" Pen-Color="0" Hidden="0"/>\n'
                 f'</Item>\n'
                 f'</Objects>\n<ElectricalObject HiddenName="0">\n<ModifierInfo/>\n</ElectricalObject>\n</CIITPinSymbolComp>\n</Item>'
             )
@@ -1304,21 +1306,29 @@ class MultisimSchematicBuilder:
         cloned_body = self._archetypes.get(archetype_key, self._archetypes["RESISTOR"])
         extra_model_xml = ""
 
-        if archetype_key == "RESISTOR":
-            cloned_body = cloned_body.replace("&amp;UNI6.8k_uc103a9", disp_val).replace("&amp;ASC6.8k", f"&amp;ASC{spice_val}")
-        elif archetype_key == "CAPACITOR":
-            if "INDUCTOR" in comp_up or "INDUCTOR" in fam_up:
-                cloned_body = (
-                    cloned_body.replace("&amp;ASCc%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;", "&amp;ASCl%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;")
-                    .replace("&amp;ASCCAPACITOR_VIRTUAL", "&amp;ASCINDUCTOR_VIRTUAL")
-                    .replace("&amp;ASCCAPACITOR", "&amp;ASCINDUCTOR")
-                    .replace("&amp;ASCVIRTUAL_CAPACITANCE", "&amp;ASCVIRTUAL_INDUCTANCE")
-                    .replace("&amp;ASCCapacitor", "&amp;ASCInductor")
-                    .replace('<Item Value="&amp;ASC31"/>', '<Item Value="&amp;ASC30"/>')
-                    .replace('<Item Value="&amp;ASCC%d"/>', '<Item Value="&amp;ASCL%d"/>')
-                    .replace('Double="204"', 'Double="208"')
-                )
-            cloned_body = cloned_body.replace("&amp;ASC1.5nF", disp_val).replace("&amp;ASC1.5n", f"&amp;ASC{spice_val}")
+        if archetype_key in ("RESISTOR", "CAPACITOR"):
+            num_val = self._parse_si_to_float(spice_val)
+            if archetype_key == "RESISTOR":
+                cloned_body = cloned_body.replace("&amp;UNI6.8k_uc103a9", disp_val).replace("&amp;ASC6.8k", f"&amp;ASC{spice_val}")
+            else:
+                if "INDUCTOR" in comp_up or "INDUCTOR" in fam_up:
+                    cloned_body = (
+                        cloned_body.replace("&amp;ASCc%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;", "&amp;ASCl%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;")
+                        .replace("&amp;ASCCAPACITOR_VIRTUAL", "&amp;ASCINDUCTOR_VIRTUAL")
+                        .replace("&amp;ASCCAPACITOR", "&amp;ASCINDUCTOR")
+                        .replace("&amp;ASCVIRTUAL_CAPACITANCE", "&amp;ASCVIRTUAL_INDUCTANCE")
+                        .replace("&amp;ASCCapacitor", "&amp;ASCInductor")
+                        .replace('<Item Value="&amp;ASC31"/>', '<Item Value="&amp;ASC30"/>')
+                        .replace('<Item Value="&amp;ASCC%d"/>', '<Item Value="&amp;ASCL%d"/>')
+                        .replace('Double="204"', 'Double="208"')
+                    )
+                cloned_body = cloned_body.replace("&amp;ASC1.5nF", disp_val).replace("&amp;ASC1.5n", f"&amp;ASC{spice_val}")
+            c_root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(f"<Root>{cloned_body}</Root>")
+            for plist in c_root.findall(".//CiaParamList") + c_root.findall(".//CiaProperDlg"):
+                dbl_item = plist.find("./doubles/Item")
+                if dbl_item is not None:
+                    dbl_item.set("Value", f"{num_val:g}")
+            cloned_body = "".join(MultisimDOMManipulator.serialize_dom_restoring_multiline_attrs(child) for child in c_root)
         elif archetype_key == "ACTIVE_IC":
             model_ci_id = self._alloc_id()
             inst.model_ci_id = model_ci_id
@@ -1620,39 +1630,7 @@ class MultisimSchematicBuilder:
         return anchors
 
     def _bridge_net_to_instrument_anchor(self, net_name: str, circuit_ref: str, circuit_pin: str = "1") -> None:
-        anchors = self._find_instrument_anchors_for_net(net_name)
-        if not anchors:
-            return
-        node_ci_id, node_text_id = self._ensure_net_node(net_name)
-        for idx, (anc_id, ax, ay) in enumerate(anchors):
-            ep1_cod_id, x1, y1, _, _, _ = self._resolve_endpoint(circuit_ref, circuit_pin, net_name, node_ci_id)
-            pin_conn_id = -anc_id
-            ep2_cod_id = self._alloc_id()
-            x2, y2 = ax, ay
-            ep_xml = (
-                f'<Item ID="{ep2_cod_id}" Class="CODPinComp">\n'
-                f'<CODPinComp Class="CODPinComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" Text="" Internal="0" CenterX="{x2}" CenterY="{y2}" Mobility="1" Pen-Style="5" Pen-Width="1" Pen-Color="0" Hidden="0">\n'
-                f'<ElectricalObject HiddenName="0">\n<ModifierInfo/>\n</ElectricalObject>\n'
-                f'<ConnectList>\n<Item ID="{pin_conn_id}" Class="CIITPinConnectorComp"/>\n</ConnectList>\n</CODPinComp>\n</Item>'
-            )
-            self.xml_text = self.xml_text.replace("<ReferencedComponents>", "<ReferencedComponents>\n" + ep_xml, 1)
-            self.xml_text = re.sub(r'(<Item\s+ID="' + str(pin_conn_id) + r'"\s+Class="CIITPinConnectorComp">.*?<ConnectList>)', lambda m: m.group(1) + f'\n<Item ID="{ep2_cod_id}" Class="CODPinComp"/>', self.xml_text, count=1, flags=re.DOTALL)
-            wire_id = self._alloc_id()
-            wire_guid = "{" + str(uuid.uuid4()).upper() + "}"
-            wire_xml = (
-                f'<Item ID="{wire_id}" Class="CIITLinkComp">\n'
-                f'<CIITLinkComp Class="CIITLinkComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" ArrowAtSource="0" ArrowAtTarget="0" LineHidden="1" PenColor="255" FgColor="0" BgColor="16777215" Pen-Style="0" Pen-Width="1" Pen-Color="16728576" Hidden="1" ShowWhenNetSet="0" Connect1="{ep1_cod_id}" Connect2="{ep2_cod_id}" IsElvisHiddenWireFlags="0" Node="{node_ci_id}" NodeText="{node_text_id}">\n'
-                f'<Points>\n<Item X="{x1}" Y="{y1}"/>\n<Item X="{x2}" Y="{y1}"/>\n<Item X="{x2}" Y="{y2}"/>\n</Points>\n'
-                f'<ElectricalObject HiddenName="0">\n<ModifierInfo>\n<Element NetModifier="&amp;ASCNI_EWB_NET_AUTONAMED">\n<Item Value="" Guid="{wire_guid}"/>\n</Element>\n</ModifierInfo>\n</ElectricalObject>\n</CIITLinkComp>\n</Item>'
-            )
-            nt_anchor = f'<Item ID="{node_text_id}" Class="CODNodeTextComp">'
-            if nt_anchor in self.xml_text:
-                self.xml_text = self.xml_text.replace(nt_anchor, wire_xml + "\n" + nt_anchor, 1)
-            else:
-                self.xml_text = self.xml_text.replace("</Objects>\n<ReferencedComponents>", wire_xml + "\n</Objects>\n<ReferencedComponents>", 1)
-            self.xml_text = re.sub(r'(<Item\s+ID="' + str(node_text_id) + r'"\s+Class="CODNodeTextComp">.*?<Links>)', lambda m: m.group(1) + f'\n<Item ID="{wire_id}" Class="CIITLinkComp"/>', self.xml_text, count=1, flags=re.DOTALL)
-            self.xml_text = self.xml_text.replace("<ReferencedComponents>", f'<ReferencedComponents>\n<Item ID="{wire_id}" Class="CIITLinkComp"/>', 1)
-            self._register_wire_in_design_net_container(wire_guid, net_name)
+        return
 
     def place_terminal_connector(self, net_name: str, x: int, y: int, is_input: bool = True) -> str:
         x = AffineGrid2D.snap9(x)
@@ -1676,8 +1654,8 @@ class MultisimSchematicBuilder:
             loc_px = int(float(pcm.group(1)))
             loc_py = int(float(pcm.group(2)))
 
-        box_x = x - loc_px
-        box_y = y - loc_py
+        box_x = x
+        box_y = y - 5
 
         id_map: Dict[str, int] = {}
         def remap_obj_id(m):
@@ -1692,18 +1670,21 @@ class MultisimSchematicBuilder:
         sym_xml = re.sub(r'Transformer-M20="[^"]+"', f'Transformer-M20="{box_x}"', sym_xml, count=1)
         sym_xml = re.sub(r'Transformer-M21="[^"]+"', f'Transformer-M21="{box_y}"', sym_xml, count=1)
         sym_xml = re.sub(r'(<CIITSymTextCompName\b[^>]*Output=")[^"]+(")', rf'\g<1>&amp;ASC{net_name}\g<2>', sym_xml, count=1)
+        sym_xml = sym_xml.replace("&amp;ASCVOUT", f"&amp;ASC{net_name}").replace("&amp;ASCVIN", f"&amp;ASC{net_name}")
         if is_input:
             sym_xml = re.sub(
                 r'(<CIITSymTextCompName\b[^>]*Transformer-M20=")[^"]+("\s+Transformer-M21=")[^"]+(")',
-                rf'\g<1>{loc_px - 22}\g<2>{loc_py - 8}\g<3>',
+                rf'\g<1>{loc_px - 28}\g<2>{loc_py - 6}\g<3>',
                 sym_xml, count=1
             )
+            sym_xml = re.sub(r'(<CIITSymTextCompName\b[^>]*HorizontalAlign=")\d+(")', r'\g<1>2\g<2>', sym_xml, count=1)
         else:
             sym_xml = re.sub(
                 r'(<CIITSymTextCompName\b[^>]*Transformer-M20=")[^"]+("\s+Transformer-M21=")[^"]+(")',
-                rf'\g<1>{loc_px + 12}\g<2>{loc_py - 8}\g<3>',
+                rf'\g<1>{loc_px + 28}\g<2>{loc_py - 6}\g<3>',
                 sym_xml, count=1
             )
+            sym_xml = re.sub(r'(<CIITSymTextCompName\b[^>]*HorizontalAlign=")\d+(")', r'\g<1>0\g<2>', sym_xml, count=1)
         sym_xml = re.sub(r'<ConnectList>.*?</ConnectList>', '<ConnectList>\n</ConnectList>', sym_xml, flags=re.DOTALL)
 
         pc_id_m = re.search(r'<Item\s+ID="(\d+)"\s+Class="CIITPinConnectorComp">', sym_xml)
@@ -1723,13 +1704,14 @@ class MultisimSchematicBuilder:
             count=1,
             flags=re.DOTALL
         )
+        comp_body = comp_body.replace("&amp;ASCVOUT", f"&amp;ASC{net_name}").replace("&amp;ASCVIN", f"&amp;ASC{net_name}")
         ci_block = (
             f'<Item CiID="{vc_ci_id}" Class="CiComponent">\n'
             f'<CiComponent Class="CiComponent" LocalName="&amp;ASC{net_name}" SymCompID="{vc_sym_id}" InstanceID="{vc_guid}" Circuit="{self.circuit_id}">'
             f'{comp_body}'
             f'</CiComponent>\n</Item>\n'
             f'<Item CiID="{vc_port_id}" Class="CiPort">\n'
-            f'<CiPort Class="CiPort" LocalName="&amp;ASC1" Component="{vc_ci_id}">\n'
+            f'<CiPort Class="CiPort" LocalName="&amp;ASCDummy_VR_Pin" Component="{vc_ci_id}">\n'
             f'<Attributes>\n<Item/>\n<Item/>\n<Item/>\n<Item/>\n'
             f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value="&amp;ASCVIRTUAL_CONN"/>\n<Item Value="&amp;ASCON_PAGE_CONNECTOR"/>\n<Item Value="&amp;ASCNON"/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n</strings>\n</CiaCollString>\n</Item>\n'
             f'<Item>\n<CiaCollString Class="CiaCollString">\n<strings>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value=""/>\n<Item Value="&amp;ASC1"/>\n<Item Value=""/>\n<Item Value="&amp;ASCGRP:A"/>\n<Item Value=""/>\n<Item Value="&amp;ASCA"/>\n<Item Value="&amp;ASCA"/>\n</strings>\n</CiaCollString>\n</Item>\n'
@@ -1788,7 +1770,7 @@ class MultisimSchematicBuilder:
         self.placed_components[vc_key] = vc_inst
         self.xml_text = re.sub(
             r'(<ComponentPins>\s*<Item[^>]*>\s*<Items>)',
-            lambda m: m.group(1) + f'\n<CSCH_CAPVirtualComponentPin Class="CSCH_CAPVirtualComponentPin" GUID="{vc_guid}" PinName="&amp;ASC1" lastnet="&amp;ASC{net_name}"/>',
+            lambda m: m.group(1) + f'\n<CSCH_CAPVirtualComponentPin Class="CSCH_CAPVirtualComponentPin" GUID="{vc_guid}" PinName="&amp;ASCDummy_VR_Pin" lastnet="&amp;ASC{net_name}"/>',
             self.xml_text, count=1
         )
         return vc_key
@@ -1842,13 +1824,9 @@ class MultisimSchematicBuilder:
                     min_x = min(po.world_x for po in pin_objs)
                     horiz_ys = [po.world_y for po in pin_objs if po.lead_x != po.world_x]
                     top_y = min(horiz_ys) if horiz_ys else min(po.world_y for po in pin_objs if po.world_x == min_x)
-                    t_key = self.place_terminal_connector("VIN", min_x - 36, top_y, is_input=True)
+                    t_key = self.place_terminal_connector("VIN", min_x - 27, top_y, is_input=True)
                     if len(terms) == 1:
-                        jb_key = "__J_VIN_BR__"
-                        self.place_junction(jb_key, min_x - 18, top_y, net_name="VIN")
-                        self.connect_pins(t_key, "1", jb_key, "J", net_name="VIN")
-                        self.connect_pins(jb_key, "J", terms[0][0], terms[0][1], net_name="VIN")
-                        self._bridge_net_to_instrument_anchor("VIN", jb_key, "J")
+                        self.connect_pins(t_key, "1", terms[0][0], terms[0][1], net_name="VIN")
                         continue
                     terms.insert(0, (t_key, "1" if t_key in self.placed_components else "J"))
             elif net.net_name == "VOUT" and terms:
@@ -1857,14 +1835,10 @@ class MultisimSchematicBuilder:
                     max_x = max(po.world_x for po in pin_objs)
                     right_ys = [po.world_y for po in pin_objs if po.world_x == max_x]
                     horiz_ys = [po.world_y for po in pin_objs if po.lead_x != po.world_x]
-                    out_y = min(horiz_ys) if horiz_ys else (min(right_ys) if right_ys else pin_objs[0].world_y)
-                    t_key = self.place_terminal_connector("VOUT", max_x + 36, out_y, is_input=False)
+                    out_y = max(horiz_ys) if horiz_ys else (min(right_ys) if right_ys else pin_objs[0].world_y)
+                    t_key = self.place_terminal_connector("VOUT", max_x + 27, out_y, is_input=False)
                     if len(terms) == 1:
-                        jb_key = "__J_VOUT_BR__"
-                        self.place_junction(jb_key, max_x + 18, out_y, net_name="VOUT")
-                        self.connect_pins(terms[0][0], terms[0][1], jb_key, "J", net_name="VOUT")
-                        self.connect_pins(jb_key, "J", t_key, "1", net_name="VOUT")
-                        self._bridge_net_to_instrument_anchor("VOUT", jb_key, "J")
+                        self.connect_pins(terms[0][0], terms[0][1], t_key, "1", net_name="VOUT")
                         continue
                     terms.append((t_key, "1" if t_key in self.placed_components else "J"))
             elif net.net_name == "0" and terms:
@@ -1881,33 +1855,10 @@ class MultisimSchematicBuilder:
                     gnd_pin = next(iter(gnd_inst.pins.keys()), "1")
                     terms.append((gnd_inst.refdes, gnd_pin))
             self.connect_net(net.net_name, terms)
-            net_juncs = [k for k in self.placed_junctions if k.startswith(f"__J_{net.net_name}_")]
-            if net.net_name in ("VIN", "VOUT", "0"):
-                if net_juncs:
-                    self._bridge_net_to_instrument_anchor(net.net_name, net_juncs[0], "J")
-                elif terms:
-                    self._bridge_net_to_instrument_anchor(net.net_name, terms[-1][0], terms[-1][1])
         return self
 
     def add_schematic_info_banner(self, title: str, lines: List[str], x: int = 333, y: int = 477) -> None:
-        all_lines = [title] + lines
-        for idx, line_txt in enumerate(all_lines):
-            tid = self._alloc_id()
-            ly = y + idx * 18
-            clean_txt = line_txt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "")
-            f_weight = "700" if idx == 0 else "400"
-            f_color = "128" if idx == 0 else "8388608"
-            t_xml = (
-                f'<Item ID="{tid}" Class="CIITSymTextCompLocation">\n'
-                f'<CIITSymTextCompLocation Class="CIITSymTextCompLocation" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" Output="&amp;ASC{clean_txt}" PenColor="0" FgColor="{f_color}" BgColor="16777215" Font-Height="-12" Font-Width="0" Font-Escapement="0" Font-Orientation="0" Font-Weight="{f_weight}" Font-Italic="0" Font-Underline="0" Font-StrikeOut="0" Font-CharSet="0" Font-OutPrecision="3" Font-ClipPrecision="2" Font-Quality="1" Font-PitchAndFamily="49" Font-FaceName="&amp;ASCCourier New" Transformer-M00="1" Transformer-M01="0" Transformer-M10="0" Transformer-M11="1" Transformer-M20="{x}" Transformer-M21="{ly}" Hidden="0" HorizontalAlign="0" VerticalAlign="0" KeepCurrentFont="1"/>\n'
-                f'</Item>'
-            )
-            self.xml_text = re.sub(
-                r'(<CODComposite\s+Class="CODComposite"[^\n]*\n<Objects>)',
-                lambda m: m.group(1) + "\n" + t_xml,
-                self.xml_text,
-                count=1
-            )
+        return
 
     def validate_dom_integrity(self) -> bool:
         ET.fromstring(self.xml_text.encode("utf-8"))
