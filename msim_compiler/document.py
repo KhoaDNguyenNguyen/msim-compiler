@@ -284,69 +284,107 @@ class MS14Document:
 
     def configure_tektronix_scopes(self, configs: List[TektronixConfig], trigger_freq_hz: float = 1000.0) -> "MS14Document":
         self.set_cdata_key("NI_EWB_TKSCOPE_POWERBUTTONON", "1")
+        self.set_cdata_key("NI_EWB_TKSCOPE_CURRENTSAMPLINGDATARUNNINGMODE", "2")
+        self.set_cdata_key("NI_EWB_TKSCOPE_RUNMODE", "0")
         self.set_cdata_key("NI_EWB_TKSCOPE_TRIGGERFREQUENCY", f"{trigger_freq_hz:.2f}")
 
-        pat_db = re.compile(
-            r'(<Element\s+Key="&amp;ASCNI_EWB_SCOPETK_DATABASEDATA">\s*<CDataElement\s+Class="CDataElement"\s+Type="5"\s+Data=")([^"]*)("\s*/>)',
+        node_pat = re.compile(
+            r'(<CSourceSymbolCollectNode\s+Class="CSourceSymbolCollectNode"\s+CompLongName="&amp;ASCXSC[234][^"]*">.*?</CSourceSymbolCollectNode>)',
             re.DOTALL
         )
-        matches = list(pat_db.finditer(self.xml_text))
-        for idx in range(min(len(matches), len(configs)) - 1, -1, -1):
-            m = matches[idx]
-            cfg = configs[idx]
-            p = m.group(2).replace("&amp;ASC", "").split("[]]_")
-            if len(p) >= 37:
-                p[5] = "1"
-                if cfg.mode.lower() == "fft":
-                    fft_span_hz = max(500.0, float(cfg.fft_hz_per_div) * 10.0)
-                    opt_acq_tb = min(TEK_TIME_STEPS, key=lambda s: abs(s - (25.0 / fft_span_hz)))
-                    p[6] = "0"
-                    p[7] = str(cfg.fft_source_ch)
-                    p[8] = "1"
-                    p[9] = "1"
-                    p[10] = "0"
-                    p[11] = "0"
-                    p[12] = "1"
-                    p[13] = f"{opt_acq_tb:g}"
-                    p[14] = "0"
-                    p[15] = "1"
-                    p[16] = "0"
-                    p[17] = "1"
-                    p[18] = "0"
-                    p[23] = str(cfg.fft_hz_per_div)
-                    p[24] = str(cfg.fft_center_hz)
-                    p[25] = str(cfg.fft_db_per_div)
-                    p[26] = str(cfg.fft_db_pos)
-                    p[29] = "1"
-                    p[31] = "0"
-                else:
-                    p[6] = "1"
-                    p[7] = "0"
-                    p[8] = str(cfg.ch1_on)
-                    p[9] = str(cfg.ch2_on)
-                    p[10] = str(cfg.ch3_on)
-                    p[11] = str(cfg.ch4_on)
-                    p[12] = str(cfg.math_on)
-                    p[13] = str(cfg.sec_per_div)
-                    p[14] = "0"
-                    p[15] = str(cfg.ch1_volts)
-                    p[16] = str(cfg.ch1_pos)
-                    p[17] = str(cfg.ch2_volts)
-                    p[18] = str(cfg.ch2_pos)
-                    p[29] = "1"
-                    p[31] = "0"
-                new_db = "&amp;ASC" + "[]]_".join(p)
-                self.xml_text = self.xml_text[:m.start()] + m.group(1) + new_db + m.group(3) + self.xml_text[m.end():]
-                self.logger.info(f"Configured Tektronix [{cfg.name}] -> Mode={cfg.mode.upper()}")
+        node_matches = list(node_pat.finditer(self.xml_text))
 
-        pat_menu = re.compile(
-            r'(<Element\s+Key="&amp;ASCNI_EWB_CURRENTMENUGROUPID">\s*<CDataElement\s+Class="CDataElement"\s+Type="1"\s+Data=")([^"]*)("\s*/>)',
-            re.DOTALL
+        def set_local_key(blk: str, key_name: str, val_str: str) -> str:
+            kpat = re.compile(
+                r'(<Element\s+Key="&amp;ASC' + re.escape(key_name) + r'">\s*<CDataElement\s+Class="CDataElement"\s+Type="\d+"\s+Data=")([^"]*)("\s*/>)',
+                re.DOTALL
+            )
+            return kpat.sub(r'\g<1>' + str(val_str) + r'\g<3>', blk)
+
+        empty_setup_list = (
+            '<Element Key="&amp;ASCNI_EWB_SETUPDATALIST">\n'
+            '<CDataElement Class="CDataElement" Type="4" Data="0">\n<Elements>\n'
+            + ('<CDataElement Class="CDataElement" Type="5" Data=""/>\n' * 11)
+            + '</Elements>\n</CDataElement>\n</Element>'
         )
-        menu_matches = list(pat_menu.finditer(self.xml_text))
-        for idx in range(min(len(menu_matches), len(configs)) - 1, -1, -1):
-            mm = menu_matches[idx]
-            self.xml_text = self.xml_text[:mm.start()] + mm.group(1) + str(configs[idx].menu_group_id) + mm.group(3) + self.xml_text[mm.end():]
+
+        for idx in range(min(len(node_matches), len(configs)) - 1, -1, -1):
+            nm = node_matches[idx]
+            nblk = nm.group(1)
+            cfg = configs[idx]
+
+            nblk = set_local_key(nblk, "NI_EWB_SHOW_WINDOW_STATUS", "1")
+            nblk = set_local_key(nblk, "NI_EWB_SIMULATION_ALLOW", "1")
+            nblk = set_local_key(nblk, "NI_EWB_TKSCOPE_POWERBUTTONON", "1")
+            nblk = set_local_key(nblk, "NI_EWB_TKSCOPE_RUNMODE", "0")
+            nblk = set_local_key(nblk, "NI_EWB_TKSCOPE_CURRENTSAMPLINGDATARUNNINGMODE", "2")
+            nblk = set_local_key(nblk, "NI_EWB_TKSCOPE_TRIGGERFREQUENCY", f"{trigger_freq_hz:.2f}")
+            nblk = set_local_key(nblk, "NI_EWB_CURRENTMENUGROUPID", "9")
+            nblk = set_local_key(nblk, "NI_EWB_CURRENTMEASUREBTID", "0")
+            nblk = re.sub(
+                r'<Element\s+Key="&amp;ASCNI_EWB_SETUPDATALIST">.*?</Elements>\s*</CDataElement>\s*</Element>',
+                empty_setup_list,
+                nblk,
+                count=1,
+                flags=re.DOTALL
+            )
+
+            if cfg.mode.lower() == "fft":
+                nblk = set_local_key(nblk, "NI_EWB_PRESELECTEDMATHGROUP", "4")
+                nblk = set_local_key(nblk, "NI_EWB_SELCHANNELID", "4")
+            else:
+                nblk = set_local_key(nblk, "NI_EWB_PRESELECTEDMATHGROUP", "2")
+                nblk = set_local_key(nblk, "NI_EWB_SELCHANNELID", "0")
+
+            pat_db = re.compile(
+                r'(<Element\s+Key="&amp;ASCNI_EWB_SCOPETK_DATABASEDATA">\s*<CDataElement\s+Class="CDataElement"\s+Type="5"\s+Data=")([^"]*)("\s*/>)',
+                re.DOTALL
+            )
+            m = pat_db.search(nblk)
+            if m:
+                p = m.group(2).replace("&amp;ASC", "").split("[]]_")
+                if len(p) >= 37:
+                    p[5] = "1"
+                    if cfg.mode.lower() == "fft":
+                        fft_span_hz = max(500.0, float(cfg.fft_hz_per_div) * 10.0)
+                        opt_acq_tb = min(TEK_TIME_STEPS, key=lambda s: abs(s - (25.0 / fft_span_hz)))
+                        p[6] = "0"
+                        p[7] = str(cfg.fft_source_ch)
+                        p[8] = "1"
+                        p[9] = "1" if int(cfg.fft_source_ch) == 1 else "0"
+                        p[10] = "0"
+                        p[11] = "0"
+                        p[12] = "1"
+                        p[13] = f"{opt_acq_tb:g}"
+                        p[14] = "0"
+                        p[15] = "1"
+                        p[16] = "0"
+                        p[17] = "1"
+                        p[18] = "0"
+                        p[23] = str(cfg.fft_hz_per_div)
+                        p[24] = str(cfg.fft_center_hz)
+                        p[25] = str(cfg.fft_db_per_div)
+                        p[26] = str(cfg.fft_db_pos)
+                    else:
+                        p[6] = "1"
+                        p[7] = "0"
+                        p[8] = str(cfg.ch1_on)
+                        p[9] = str(cfg.ch2_on)
+                        p[10] = str(cfg.ch3_on)
+                        p[11] = str(cfg.ch4_on)
+                        p[12] = str(cfg.math_on)
+                        p[13] = str(cfg.sec_per_div)
+                        p[14] = "0"
+                        p[15] = str(cfg.ch1_volts)
+                        p[16] = str(cfg.ch1_pos)
+                        p[17] = str(cfg.ch2_volts)
+                        p[18] = str(cfg.ch2_pos)
+                    new_db = "&amp;ASC" + "[]]_".join(p)
+                    nblk = nblk[:m.start()] + m.group(1) + new_db + m.group(3) + nblk[m.end():]
+
+            self.xml_text = self.xml_text[:nm.start()] + nblk + self.xml_text[nm.end():]
+            self.logger.info(f"Configured Tektronix [{cfg.name}] -> Mode={cfg.mode.upper()}")
+
         return self
 
     def configure_dashboard_layout(self, rects: List[WindowRect]) -> "MS14Document":
@@ -400,8 +438,8 @@ class MS14Document:
 
         tek_configs = [
             TektronixConfig("XSC2_TimeDomain_InOut", mode="time", ch1_on=1, ch2_on=1, math_on=0, sec_per_div=f"{opt_tek_tb:g}", ch1_volts="1", ch1_pos="2", ch2_volts="1", ch2_pos="-2", menu_group_id=9),
-            TektronixConfig("XSC3_FFT_Input_CH1", mode="fft", fft_source_ch=0, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=0),
-            TektronixConfig("XSC4_FFT_Output_CH2", mode="fft", fft_source_ch=1, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=0)
+            TektronixConfig("XSC3_FFT_Input_CH1", mode="fft", fft_source_ch=0, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=9),
+            TektronixConfig("XSC4_FFT_Output_CH2", mode="fft", fft_source_ch=1, fft_hz_per_div=str(opt_fft_hz), fft_center_hz=str(opt_fft_center), fft_db_per_div="10", fft_db_pos="20", menu_group_id=9)
         ]
         self.configure_tektronix_scopes(tek_configs, trigger_freq_hz=f_wave)
 
