@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
@@ -150,295 +151,294 @@ namespace MultiSimCodec
             return outPos;
         }
 
-        private static int FindLenSymbol(int len)
+        public static void InitTables()
         {
-            if (len == 2) return 1;
-            if (len == 3) return 0;
-            for (int s = 2; s < 16; s++)
-                if (len >= BaseLen[s] && len <= BaseLen[s] + (1 << ExtraLen[s]) - 1) return s;
-            return 15;
-        }
-
-        private static byte[] ImplodeBlock(byte[] src, int srcOffset, int srcLen)
-        {
-            BitWriter bw = new BitWriter();
-            bw.PutBits(1, 8); bw.PutBits(6, 8);
-            int[] head = new int[65536], prev = new int[srcLen];
-            for (int i = 0; i < head.Length; i++) head[i] = -1;
-
-            int pos = 0;
-            while (pos < srcLen)
-            {
-                int bestLen = 0, bestDist = 0;
-                if (pos + 2 < srcLen)
-                {
-                    int h = ((src[srcOffset + pos] << 8) ^ (src[srcOffset + pos + 1] << 4) ^ src[srcOffset + pos + 2]) & 0xFFFF;
-                    int matchPos = head[h]; prev[pos] = matchPos; head[h] = pos;
-                    int chainLen = 0, maxLen = Math.Min(518, srcLen - pos);
-                    while (matchPos >= 0 && (pos - matchPos) <= 4096 && chainLen++ < 48)
-                    {
-                        if (src[srcOffset + matchPos + bestLen] == src[srcOffset + pos + bestLen])
-                        {
-                            int l = 0;
-                            while (l < maxLen && src[srcOffset + matchPos + l] == src[srcOffset + pos + l]) l++;
-                            if (l >= 3 && l > bestLen) { bestLen = l; bestDist = pos - matchPos; if (l >= 128) break; }
-                        }
-                        matchPos = prev[matchPos];
-                    }
-                }
-                if (bestLen >= 3)
-                {
-                    bw.PutBits(1, 1);
-                    int lSym = FindLenSymbol(bestLen);
-                    bw.PutBits(LenCode.encCode[lSym], LenCode.encLen[lSym]);
-                    if (ExtraLen[lSym] > 0) bw.PutBits(bestLen - BaseLen[lSym], ExtraLen[lSym]);
-                    int d = bestDist - 1, dSym = d >> 6, dExtra = d & 0x3F;
-                    bw.PutBits(DistCode.encCode[dSym], DistCode.encLen[dSym]);
-                    bw.PutBits(dExtra, 6);
-                    for (int k = 1; k < bestLen; k++)
-                    {
-                        int p = pos + k;
-                        if (p + 2 < srcLen)
-                        {
-                            int hk = ((src[srcOffset + p] << 8) ^ (src[srcOffset + p + 1] << 4) ^ src[srcOffset + p + 2]) & 0xFFFF;
-                            prev[p] = head[hk]; head[hk] = p;
-                        }
-                    }
-                    pos += bestLen;
-                }
-                else
-                {
-                    bw.PutBits(0, 1);
-                    int b = src[srcOffset + pos++];
-                    bw.PutBits(LitCode.encCode[b], LitCode.encLen[b]);
-                }
-            }
-            bw.PutBits(1, 1);
-            bw.PutBits(LenCode.encCode[15], LenCode.encLen[15]);
-            bw.PutBits(0xFF, 8);
-            return bw.Finish();
-        }
-
-        public static void OldMain(string[] args)
-        {
-            
             ConstructTable(LitCode, LitLen);
             ConstructTable(LenCode, LenLen);
             ConstructTable(DistCode, DistLen);
-            if (args == null || args.Length < 3) return; byte[] fileData = File.ReadAllBytes(args[1]);
-            if (args[0].ToLowerInvariant() == "decode")
-            {
-                uint totalUncompSize = BitConverter.ToUInt32(fileData, 36);
-                byte[] outputBuffer = new byte[totalUncompSize];
-                int pos = 36 + BlockInfoSize, bytesWritten = 0;
-                while (pos < fileData.Length)
-                {
-                    uint blkComp = BitConverter.ToUInt32(fileData, pos + 4);
-                    bytesWritten += ExplodeBlock(fileData, pos + BlockInfoSize, (int)blkComp, outputBuffer, bytesWritten);
-                    pos += (int)blkComp + BlockInfoSize;
-                }
-                File.WriteAllBytes(args[2], outputBuffer);
-            }
-            else
-            {
-                byte[] sigBytes = Encoding.ASCII.GetBytes(MagicSignature);
-                using (FileStream fs = File.Create(args[2]))
-                {
-                    fs.Write(sigBytes, 0, sigBytes.Length);
-                    fs.Write(BitConverter.GetBytes((uint)fileData.Length), 0, 4);
-                    fs.Write(BitConverter.GetBytes((uint)0), 0, 4);
-                    int bytesRead = 0;
-                    while (bytesRead < fileData.Length)
-                    {
-                        int blockSize = Math.Min(fileData.Length - bytesRead, MaxBlockSize);
-                        byte[] compBlock = ImplodeBlock(fileData, bytesRead, blockSize);
-                        fs.Write(BitConverter.GetBytes((uint)blockSize), 0, 4);
-                        fs.Write(BitConverter.GetBytes((uint)compBlock.Length), 0, 4);
-                        fs.Write(compBlock, 0, compBlock.Length);
-                        bytesRead += blockSize;
-                    }
-                }
-            }
         }
     }
 }
 
-public class DbBridgeProgram {
-    static string EscJson(string s) {
+public class DbBridgeProgram
+{
+    static string EscJson(string s)
+    {
         if (s == null) return "";
         return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
     }
 
-    public static void Main(string[] args) {
+    static string BuildParsedParamsJson(string rawParamData)
+    {
+        if (string.IsNullOrEmpty(rawParamData)) return "{}";
+        StringBuilder sb = new StringBuilder();
+        sb.Append("{");
+        bool first = true;
+        string[] tokens = rawParamData.Split(new char[] { '\r', '\n', ';', '|' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string tok in tokens)
+        {
+            int eqIdx = tok.IndexOf('=');
+            if (eqIdx <= 0) eqIdx = tok.IndexOf(':');
+            if (eqIdx > 0 && eqIdx < tok.Length - 1)
+            {
+                string k = tok.Substring(0, eqIdx).Trim();
+                string v = tok.Substring(eqIdx + 1).Trim();
+                if (k.Length > 0)
+                {
+                    if (!first) sb.Append(", ");
+                    sb.AppendFormat("\"{0}\": \"{1}\"", EscJson(k), EscJson(v));
+                    first = false;
+                }
+            }
+        }
+        sb.Append("}");
+        return sb.ToString();
+    }
+
+    public static void Main(string[] args)
+    {
+        if (args == null || args.Length < 3)
+        {
+            Console.Error.WriteLine("[DB-BRIDGE] Invalid arguments. Expected: <dbPath> <password> <queryName> [outJsonPath]");
+            Environment.Exit(1);
+        }
+
         string dbPath = args[0];
         string pwd = args[1];
         string queryName = args[2];
-        string outJsonPath = args[3];
+        string outJsonPath = args.Length >= 4 ? args[3] : "";
 
-        MultiSimCodec.CodecCore.OldMain(new string[0]);
-        string connStr = string.Format("Provider=Microsoft.Jet.OLEDB.4.0;Data Source=\"{0}\";Jet OLEDB:Database Password=\"{1}\";", dbPath, pwd);
+        try
+        {
+            MultiSimCodec.CodecCore.InitTables();
+            string connStr = string.Format("Provider=Microsoft.Jet.OLEDB.4.0;Data Source=\"{0}\";Jet OLEDB:Database Password=\"{1}\";", dbPath, pwd);
 
-        using (System.Data.OleDb.OleDbConnection conn = new System.Data.OleDb.OleDbConnection(connStr)) {
-            conn.Open();
-            int compId = -1;
-            int famId = -1;
-            string compName = "";
-            int pinCount = 0;
-            string pinout = "";
-            string pinGroup = "";
-            string pinType = "";
-            string pinFamily = "";
-            string compFunc = "";
-            string compMfr = "Generic";
+            using (System.Data.OleDb.OleDbConnection conn = new System.Data.OleDb.OleDbConnection(connStr))
+            {
+                conn.Open();
+                int compId = -1;
+                int famId = -1;
+                string compName = "";
+                int pinCount = 0;
+                string pinout = "";
+                string pinGroup = "";
+                string pinType = "";
+                string pinFamily = "";
+                string compFunc = "";
+                string compMfr = "Generic";
 
-            string[] queries = new string[] {
-                "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] = '" + queryName.Replace("'", "''") + "'",
-                "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] LIKE '" + queryName.Replace("'", "''") + "%'",
-                "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] LIKE '%" + queryName.Replace("'", "''") + "%'"
-            };
+                string safeQuery = queryName.Replace("'", "''");
+                string[] queries = new string[] {
+                    "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] = '" + safeQuery + "'",
+                    "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] LIKE '" + safeQuery + "%'",
+                    "SELECT TOP 1 * FROM [SYS_COMPONENT] WHERE [Component_Name] LIKE '%" + safeQuery + "%'"
+                };
 
-            foreach (string sql in queries) {
-                if (compId >= 0) break;
-                using (System.Data.OleDb.OleDbCommand cmd = new System.Data.OleDb.OleDbCommand(sql, conn))
-                using (System.Data.OleDb.OleDbDataReader r = cmd.ExecuteReader()) {
-                    if (r.Read()) {
-                        compId = Convert.ToInt32(r["Component_ID"]);
-                        famId = Convert.ToInt32(r["Family_ID"]);
-                        compName = r["Component_Name"].ToString();
-                        pinCount = Convert.ToInt32(r["Pin_Number"]);
-                        pinout = r["Pinout"] != DBNull.Value ? r["Pinout"].ToString() : "";
-                        pinGroup = r["Pin_Group"] != DBNull.Value ? r["Pin_Group"].ToString() : "";
-                        pinType = r["Pin_Type"] != DBNull.Value ? r["Pin_Type"].ToString() : "";
-                        pinFamily = r["Pin_Family"] != DBNull.Value ? r["Pin_Family"].ToString() : "NON";
-                        compFunc = r["Function"] != DBNull.Value ? r["Function"].ToString() : "";
-                        if (r["Manufacturer"] != DBNull.Value && !string.IsNullOrEmpty(r["Manufacturer"].ToString())) {
-                            compMfr = r["Manufacturer"].ToString();
+                foreach (string sql in queries)
+                {
+                    if (compId >= 0) break;
+                    using (System.Data.OleDb.OleDbCommand cmd = new System.Data.OleDb.OleDbCommand(sql, conn))
+                    using (System.Data.OleDb.OleDbDataReader r = cmd.ExecuteReader())
+                    {
+                        if (r.Read())
+                        {
+                            compId = Convert.ToInt32(r["Component_ID"]);
+                            famId = Convert.ToInt32(r["Family_ID"]);
+                            compName = r["Component_Name"].ToString();
+                            pinCount = Convert.ToInt32(r["Pin_Number"]);
+                            pinout = r["Pinout"] != DBNull.Value ? r["Pinout"].ToString() : "";
+                            pinGroup = r["Pin_Group"] != DBNull.Value ? r["Pin_Group"].ToString() : "";
+                            pinType = r["Pin_Type"] != DBNull.Value ? r["Pin_Type"].ToString() : "";
+                            pinFamily = r["Pin_Family"] != DBNull.Value ? r["Pin_Family"].ToString() : "NON";
+                            compFunc = r["Function"] != DBNull.Value ? r["Function"].ToString() : "";
+                            if (r["Manufacturer"] != DBNull.Value && !string.IsNullOrEmpty(r["Manufacturer"].ToString()))
+                            {
+                                compMfr = r["Manufacturer"].ToString();
+                            }
                         }
                     }
                 }
-            }
 
-            if (compId < 0) {
-                Environment.Exit(2);
-            }
-
-            string famName = "";
-            string refTpl = "U%d";
-            int famGroupId = 2;
-            string sqlFam = "SELECT TOP 1 * FROM [SYS_CONFIGURATION] WHERE [Family_ID] = " + famId;
-            using (System.Data.OleDb.OleDbCommand fCmd = new System.Data.OleDb.OleDbCommand(sqlFam, conn))
-            using (System.Data.OleDb.OleDbDataReader fr = fCmd.ExecuteReader()) {
-                if (fr.Read()) {
-                    famName = fr["Family_Name"].ToString();
-                    refTpl = fr["Template"].ToString();
-                    if (fr["Family_Group_ID"] != DBNull.Value) {
-                        famGroupId = Convert.ToInt32(fr["Family_Group_ID"]);
-                    }
+                if (compId < 0)
+                {
+                    Console.Error.WriteLine("[DB-BRIDGE] Component query not found: " + queryName);
+                    Environment.Exit(2);
                 }
-            }
 
-            string famGroup = "Basic";
-            string sqlGrp = "SELECT TOP 1 * FROM [SYS_CONFIGURATION_GROUPS] WHERE [Family_Group_ID] = " + famGroupId;
-            using (System.Data.OleDb.OleDbCommand gCmd = new System.Data.OleDb.OleDbCommand(sqlGrp, conn))
-            using (System.Data.OleDb.OleDbDataReader gr = gCmd.ExecuteReader()) {
-                if (gr.Read() && gr["Family_Group"] != DBNull.Value) {
-                    famGroup = gr["Family_Group"].ToString();
-                }
-            }
-
-            int symId = -1;
-            string symPinout = "";
-            string sqlSym = "SELECT TOP 1 * FROM [SYS_MAPPING_COMP_SYMBOL] WHERE [Component_ID] = " + compId;
-            using (System.Data.OleDb.OleDbCommand sCmd = new System.Data.OleDb.OleDbCommand(sqlSym, conn))
-            using (System.Data.OleDb.OleDbDataReader sr = sCmd.ExecuteReader()) {
-                if (sr.Read()) {
-                    symId = Convert.ToInt32(sr["Symbol_ID_ANSI"]);
-                    symPinout = sr["Pinout_ANSI"].ToString();
-                }
-            }
-
-            string drdocXml = "";
-            if (symId >= 0) {
-                string sqlPic = "SELECT TOP 1 * FROM [SYS_SYMBOL_PICTURE] WHERE [Symbol_ID] = " + symId;
-                using (System.Data.OleDb.OleDbCommand pCmd = new System.Data.OleDb.OleDbCommand(sqlPic, conn))
-                using (System.Data.OleDb.OleDbDataReader pr = pCmd.ExecuteReader()) {
-                    if (pr.Read()) {
-                        int origSize = Convert.ToInt32(pr["Size"]);
-                        byte[] raw = (byte[])pr["Image"];
-                        byte[] dst = new byte[Math.Max(origSize + 65536, 500000)];
-                        int decLen = MultiSimCodec.CodecCore.ExplodeBlock(raw, 5, raw.Length - 5, dst, 0);
-                        drdocXml = Encoding.UTF8.GetString(dst, 0, decLen);
-                    }
-                }
-            }
-
-            string modId = "";
-            string spiceTpl = "";
-            string sqlModMap = "SELECT TOP 1 * FROM [SYS_MAPPING_COMP_MODEL] WHERE [Component_ID] = " + compId;
-            using (System.Data.OleDb.OleDbCommand mmCmd = new System.Data.OleDb.OleDbCommand(sqlModMap, conn))
-            using (System.Data.OleDb.OleDbDataReader mmr = mmCmd.ExecuteReader()) {
-                if (mmr.Read()) {
-                    modId = mmr["Model_ID"].ToString();
-                    spiceTpl = mmr["Template"].ToString();
-                }
-            }
-
-            string spiceData = "";
-            if (!string.IsNullOrEmpty(modId)) {
-                string sqlMod = "SELECT TOP 1 * FROM [SYS_MODEL] WHERE [MODEL_ID] = '" + modId.Replace("'", "''") + "'";
-                using (System.Data.OleDb.OleDbCommand mCmd = new System.Data.OleDb.OleDbCommand(sqlMod, conn))
-                using (System.Data.OleDb.OleDbDataReader mr = mCmd.ExecuteReader()) {
-                    if (mr.Read() && mr["DATA"] != DBNull.Value) {
-                        spiceData = mr["DATA"].ToString();
-                    }
-                }
-            }
-
-            string paramDataRaw = "";
-            try {
-                string sqlParam = "SELECT TOP 1 * FROM [SYS_PARAMETER_DATA] WHERE [Component_ID] = " + compId;
-                using (System.Data.OleDb.OleDbCommand pdCmd = new System.Data.OleDb.OleDbCommand(sqlParam, conn))
-                using (System.Data.OleDb.OleDbDataReader pdr = pdCmd.ExecuteReader()) {
-                    if (pdr.Read() && pdr["Parameter_Data"] != DBNull.Value) {
-                        paramDataRaw = pdr["Parameter_Data"].ToString();
-                    }
-                }
-            } catch {}
-
-            if (string.IsNullOrEmpty(paramDataRaw)) {
-                try {
-                    string sqlVirt = "SELECT TOP 1 * FROM [SYS_VIRTUAL] WHERE [Component_ID] = " + compId;
-                    using (System.Data.OleDb.OleDbCommand vCmd = new System.Data.OleDb.OleDbCommand(sqlVirt, conn))
-                    using (System.Data.OleDb.OleDbDataReader vr = vCmd.ExecuteReader()) {
-                        if (vr.Read() && vr["Parameter_Data"] != DBNull.Value) {
-                            paramDataRaw = vr["Parameter_Data"].ToString();
+                string famName = "";
+                string refTpl = "U%d";
+                int famGroupId = 2;
+                string sqlFam = "SELECT TOP 1 * FROM [SYS_CONFIGURATION] WHERE [Family_ID] = " + famId;
+                using (System.Data.OleDb.OleDbCommand fCmd = new System.Data.OleDb.OleDbCommand(sqlFam, conn))
+                using (System.Data.OleDb.OleDbDataReader fr = fCmd.ExecuteReader())
+                {
+                    if (fr.Read())
+                    {
+                        famName = fr["Family_Name"].ToString();
+                        refTpl = fr["Template"].ToString();
+                        if (fr["Family_Group_ID"] != DBNull.Value)
+                        {
+                            famGroupId = Convert.ToInt32(fr["Family_Group_ID"]);
                         }
                     }
-                } catch {}
-            }
+                }
 
-            string finalPinout = !string.IsNullOrEmpty(symPinout) ? symPinout : pinout;
-            StringBuilder jb = new StringBuilder();
-            jb.Append("{");
-            jb.AppendFormat("\"comp_id\": {0}, \"family_id\": {1}, ", compId, famId);
-            jb.AppendFormat("\"comp_name\": \"{0}\", ", EscJson(compName));
-            jb.AppendFormat("\"family_name\": \"{0}\", ", EscJson(famName));
-            jb.AppendFormat("\"family_group\": \"{0}\", ", EscJson(famGroup));
-            jb.AppendFormat("\"ref_template\": \"{0}\", ", EscJson(refTpl));
-            jb.AppendFormat("\"pin_count\": {0}, ", pinCount);
-            jb.AppendFormat("\"pinout\": \"{0}\", ", EscJson(finalPinout));
-            jb.AppendFormat("\"pin_group\": \"{0}\", ", EscJson(pinGroup));
-            jb.AppendFormat("\"pin_type\": \"{0}\", ", EscJson(pinType));
-            jb.AppendFormat("\"pin_family\": \"{0}\", ", EscJson(pinFamily));
-            jb.AppendFormat("\"manufacturer\": \"{0}\", ", EscJson(compMfr));
-            jb.AppendFormat("\"function\": \"{0}\", ", EscJson(compFunc));
-            jb.AppendFormat("\"symbol_id\": {0}, ", symId);
-            jb.AppendFormat("\"drdoc_xml\": \"{0}\", ", EscJson(drdocXml));
-            jb.AppendFormat("\"model_id\": \"{0}\", ", EscJson(modId));
-            jb.AppendFormat("\"spice_template\": \"{0}\", ", EscJson(spiceTpl));
-            jb.AppendFormat("\"spice_data\": \"{0}\", \"param_data\": \"{1}\"", EscJson(spiceData), EscJson(paramDataRaw));
-            jb.Append("}");
-            File.WriteAllText(outJsonPath, jb.ToString(), Encoding.UTF8);
+                string famGroup = "Basic";
+                string sqlGrp = "SELECT TOP 1 * FROM [SYS_CONFIGURATION_GROUPS] WHERE [Family_Group_ID] = " + famGroupId;
+                using (System.Data.OleDb.OleDbCommand gCmd = new System.Data.OleDb.OleDbCommand(sqlGrp, conn))
+                using (System.Data.OleDb.OleDbDataReader gr = gCmd.ExecuteReader())
+                {
+                    if (gr.Read() && gr["Family_Group"] != DBNull.Value)
+                    {
+                        famGroup = gr["Family_Group"].ToString();
+                    }
+                }
+
+                int symId = -1;
+                string symPinout = "";
+                string sqlSym = "SELECT TOP 1 * FROM [SYS_MAPPING_COMP_SYMBOL] WHERE [Component_ID] = " + compId;
+                using (System.Data.OleDb.OleDbCommand sCmd = new System.Data.OleDb.OleDbCommand(sqlSym, conn))
+                using (System.Data.OleDb.OleDbDataReader sr = sCmd.ExecuteReader())
+                {
+                    if (sr.Read())
+                    {
+                        symId = Convert.ToInt32(sr["Symbol_ID_ANSI"]);
+                        symPinout = sr["Pinout_ANSI"].ToString();
+                    }
+                }
+
+                string drdocXml = "";
+                if (symId >= 0)
+                {
+                    string sqlPic = "SELECT TOP 1 * FROM [SYS_SYMBOL_PICTURE] WHERE [Symbol_ID] = " + symId;
+                    using (System.Data.OleDb.OleDbCommand pCmd = new System.Data.OleDb.OleDbCommand(sqlPic, conn))
+                    using (System.Data.OleDb.OleDbDataReader pr = pCmd.ExecuteReader())
+                    {
+                        if (pr.Read())
+                        {
+                            int origSize = Convert.ToInt32(pr["Size"]);
+                            byte[] raw = (byte[])pr["Image"];
+                            byte[] dst = new byte[Math.Max(origSize + 65536, 500000)];
+                            int decLen = MultiSimCodec.CodecCore.ExplodeBlock(raw, 5, raw.Length - 5, dst, 0);
+                            drdocXml = Encoding.UTF8.GetString(dst, 0, decLen);
+                        }
+                    }
+                }
+
+                string modId = "";
+                string spiceTpl = "";
+                string sqlModMap = "SELECT TOP 1 * FROM [SYS_MAPPING_COMP_MODEL] WHERE [Component_ID] = " + compId;
+                using (System.Data.OleDb.OleDbCommand mmCmd = new System.Data.OleDb.OleDbCommand(sqlModMap, conn))
+                using (System.Data.OleDb.OleDbDataReader mmr = mmCmd.ExecuteReader())
+                {
+                    if (mmr.Read())
+                    {
+                        modId = mmr["Model_ID"].ToString();
+                        spiceTpl = mmr["Template"].ToString();
+                    }
+                }
+
+                string spiceData = "";
+                if (!string.IsNullOrEmpty(modId))
+                {
+                    string sqlMod = "SELECT TOP 1 * FROM [SYS_MODEL] WHERE [MODEL_ID] = '" + modId.Replace("'", "''") + "'";
+                    using (System.Data.OleDb.OleDbCommand mCmd = new System.Data.OleDb.OleDbCommand(sqlMod, conn))
+                    using (System.Data.OleDb.OleDbDataReader mr = mCmd.ExecuteReader())
+                    {
+                        if (mr.Read() && mr["DATA"] != DBNull.Value)
+                        {
+                            spiceData = mr["DATA"].ToString();
+                        }
+                    }
+                }
+
+                string paramDataRaw = "";
+                try
+                {
+                    string sqlParam = "SELECT TOP 1 * FROM [SYS_PARAMETER_DATA] WHERE [Component_ID] = " + compId;
+                    using (System.Data.OleDb.OleDbCommand pdCmd = new System.Data.OleDb.OleDbCommand(sqlParam, conn))
+                    using (System.Data.OleDb.OleDbDataReader pdr = pdCmd.ExecuteReader())
+                    {
+                        if (pdr.Read() && pdr["Parameter_Data"] != DBNull.Value)
+                        {
+                            if (pdr["Parameter_Data"] is byte[])
+                            {
+                                paramDataRaw = Encoding.UTF8.GetString((byte[])pdr["Parameter_Data"]);
+                            }
+                            else
+                            {
+                                paramDataRaw = pdr["Parameter_Data"].ToString();
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (string.IsNullOrEmpty(paramDataRaw))
+                {
+                    try
+                    {
+                        string sqlVirt = "SELECT TOP 1 * FROM [SYS_VIRTUAL] WHERE [Component_ID] = " + compId;
+                        using (System.Data.OleDb.OleDbCommand vCmd = new System.Data.OleDb.OleDbCommand(sqlVirt, conn))
+                        using (System.Data.OleDb.OleDbDataReader vr = vCmd.ExecuteReader())
+                        {
+                            if (vr.Read() && vr["Parameter_Data"] != DBNull.Value)
+                            {
+                                if (vr["Parameter_Data"] is byte[])
+                                {
+                                    paramDataRaw = Encoding.UTF8.GetString((byte[])vr["Parameter_Data"]);
+                                }
+                                else
+                                {
+                                    paramDataRaw = vr["Parameter_Data"].ToString();
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                string finalPinout = !string.IsNullOrEmpty(symPinout) ? symPinout : pinout;
+                string parsedParamsJson = BuildParsedParamsJson(paramDataRaw);
+                StringBuilder jb = new StringBuilder();
+                jb.Append("{");
+                jb.AppendFormat("\"comp_id\": {0}, \"family_id\": {1}, ", compId, famId);
+                jb.AppendFormat("\"comp_name\": \"{0}\", ", EscJson(compName));
+                jb.AppendFormat("\"family_name\": \"{0}\", ", EscJson(famName));
+                jb.AppendFormat("\"family_group\": \"{0}\", ", EscJson(famGroup));
+                jb.AppendFormat("\"ref_template\": \"{0}\", ", EscJson(refTpl));
+                jb.AppendFormat("\"pin_count\": {0}, ", pinCount);
+                jb.AppendFormat("\"pinout\": \"{0}\", ", EscJson(finalPinout));
+                jb.AppendFormat("\"pin_group\": \"{0}\", ", EscJson(pinGroup));
+                jb.AppendFormat("\"pin_type\": \"{0}\", ", EscJson(pinType));
+                jb.AppendFormat("\"pin_family\": \"{0}\", ", EscJson(pinFamily));
+                jb.AppendFormat("\"manufacturer\": \"{0}\", ", EscJson(compMfr));
+                jb.AppendFormat("\"function\": \"{0}\", ", EscJson(compFunc));
+                jb.AppendFormat("\"symbol_id\": {0}, ", symId);
+                jb.AppendFormat("\"drdoc_xml\": \"{0}\", ", EscJson(drdocXml));
+                jb.AppendFormat("\"model_id\": \"{0}\", ", EscJson(modId));
+                jb.AppendFormat("\"spice_template\": \"{0}\", ", EscJson(spiceTpl));
+                jb.AppendFormat("\"spice_data\": \"{0}\", ", EscJson(spiceData));
+                jb.AppendFormat("\"param_data\": \"{0}\", ", EscJson(paramDataRaw));
+                jb.AppendFormat("\"parsed_params\": {0}", parsedParamsJson);
+                jb.Append("}");
+
+                if (!string.IsNullOrEmpty(outJsonPath) && outJsonPath != "-")
+                {
+                    File.WriteAllText(outJsonPath, jb.ToString(), Encoding.UTF8);
+                }
+                else
+                {
+                    Console.OutputEncoding = new UTF8Encoding(false);
+                    Console.Out.Write(jb.ToString());
+                    Console.Out.Flush();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[DB-BRIDGE-EXCEPTION] " + ex.GetType().Name + ": " + ex.Message);
+            Environment.Exit(3);
         }
     }
 }
