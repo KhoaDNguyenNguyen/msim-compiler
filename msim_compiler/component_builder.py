@@ -146,7 +146,7 @@ class ComponentDomBuilder:
                 elif val in ("&ASC1.5n", "&ASC6.8k"):
                     el.set("Value", "&ASC__MSIM_SPICE_VAL__")
         for plist in comp_el.findall(".//CiaParamList") + comp_el.findall(".//CiaProperDlg"):
-            dbl = plist.find("./doubles/Item")
+            dbl = plist.find(".//doubles/Item")
             if dbl is not None:
                 dbl.set("Value", "__MSIM_NUM_VAL__")
 
@@ -285,7 +285,7 @@ class ComponentDomBuilder:
                 sk_comp = copy.deepcopy(self._skeletons["PASSIVE_VIRTUAL"])
 
             if is_capacitor:
-                eff_spice_tpl = "c%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;"
+                eff_spice_tpl = f"c%p %t1 %t2 {num_val:.6e}"
                 fam_id_str = str(part.family_id if part.family_id and part.family_id != 29 else 31)
                 ref_tpl_str = "C%d"
                 cia_dbl_str = "204"
@@ -294,7 +294,7 @@ class ComponentDomBuilder:
                 func_desc_str = "VIRTUAL_CAPACITANCE"
                 type_lbl_str = "Capacitor"
             elif is_inductor:
-                eff_spice_tpl = "l%p %t1 %t2 \x231 %v4?IC=\x235%v:%v;"
+                eff_spice_tpl = f"l%p %t1 %t2 {num_val:.6e}"
                 fam_id_str = str(part.family_id if part.family_id and part.family_id != 29 else 30)
                 ref_tpl_str = "L%d"
                 cia_dbl_str = "208"
@@ -303,7 +303,7 @@ class ComponentDomBuilder:
                 func_desc_str = "VIRTUAL_INDUCTANCE"
                 type_lbl_str = "Inductor"
             else:
-                eff_spice_tpl = "r%p %t1 %t2 \x231"
+                eff_spice_tpl = f"r%p %t1 %t2 {num_val:.6e}"
                 fam_id_str = str(part.family_id or 29)
                 ref_tpl_str = "R%d"
                 cia_dbl_str = "200"
@@ -333,7 +333,7 @@ class ComponentDomBuilder:
                     el.set("String", f"&ASC{eff_spice_tpl}")
 
             for plist in sk_comp.findall(".//CiaParamList") + sk_comp.findall(".//CiaProperDlg"):
-                dbl_item = plist.find("./doubles/Item")
+                dbl_item = plist.find(".//doubles/Item")
                 if dbl_item is not None:
                     dbl_item.set("Value", f"{num_val:g}")
         else:
