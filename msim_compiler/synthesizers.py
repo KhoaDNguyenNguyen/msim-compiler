@@ -94,7 +94,7 @@ class ButterworthFilterPlugin(ICircuitSynthesizer):
 
                 parts.append(PartPlacementSpec(ra_ref, "RESISTOR_VIRTUAL", ra_val, x=col_x, y=row_series_y, rotation=0))
                 parts.append(PartPlacementSpec(rb_ref, "RESISTOR_VIRTUAL", rb_val, x=col_x + 90, y=row_series_y, rotation=0))
-                parts.append(PartPlacementSpec(cfb_ref, "CAPACITOR_VIRTUAL", cfb_val, x=col_x + 81, y=row_fb_y, rotation=0))
+                parts.append(PartPlacementSpec(cfb_ref, "CAPACITOR_VIRTUAL", cfb_val, x=col_x + 90, y=row_fb_y, rotation=0))
                 parts.append(PartPlacementSpec(csh_ref, "CAPACITOR_VIRTUAL", csh_val, x=col_x + 126, y=row_shunt_y, rotation=90))
 
                 stage_out_terms.append((ra_ref, "1"))
@@ -106,8 +106,8 @@ class ButterworthFilterPlugin(ICircuitSynthesizer):
                     nets.append(NetConnectionSpec("VOUT", stage_out_terms))
                 gnd_terms.append((csh_ref, "2"))
 
-                spice_overrides[ra_ref] = "e_in_%p n_in_%p 0 %t1 0 1.0\r\nr%p n_in_%p %t2 \x231\r\n"
-                spice_overrides[rb_ref] = f"r%p %t1 n_pls_%p \x231\r\nc_sk_%p n_pls_%p 0 {st.c1_farad:.6e}\r\ne_sk_%p %t2 0 n_pls_%p 0 1.0\r\n"
+                spice_overrides[ra_ref] = "e_in_%p n_in_%p 0 %t1 0 1.0\r\nr%p n_in_%p %t2 \x231 vres%p %v4?TEMP=\x235%v:%v; .model vres%p r(%v6?TC1=\x237%v:%v; %v8?TC2=\x239%v:%v; %v10?TNOM=\x2311%v:%v;)"
+                spice_overrides[rb_ref] = f"r%p %t1 n_pls_%p \x231 vres%p %v4?TEMP=\x235%v:%v; .model vres%p r(%v6?TC1=\x237%v:%v; %v8?TC2=\x239%v:%v; %v10?TNOM=\x2311%v:%v;)\r\nc_sk_%p n_pls_%p 0 {st.c1_farad:.6e}\r\ne_sk_%p %t2 0 n_pls_%p 0 1.0"
                 stage_summaries.append(f"Stage {s_num} (Biquad Q={st.q_factor:.3f}): {ra_ref}={rb_ref}={ra_val}, {cfb_ref}={cfb_val}F, {csh_ref}={csh_val}F")
                 col_x += 198
 
