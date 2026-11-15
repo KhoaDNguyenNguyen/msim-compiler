@@ -41,6 +41,7 @@ class MultisimHighOrderCompiler:
             y=486
         )
 
+        builder.validate_dom_integrity()
         audit = builder.eda.audit_schematic_dom(builder.xml_text)
         f_fund = harmonics[0].freq_hz if harmonics else plan.fc_hz * 0.5
         doc = MS14Document(codec=self.codec)

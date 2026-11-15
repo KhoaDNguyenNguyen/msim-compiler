@@ -1,6 +1,7 @@
 from .logger import get_logger
 from .config_registry import EDAConfigRegistry, GLOBAL_CONFIG, GridRoutingConfig, SimulationProfileSpec
 from .dom_engine import MultisimDOMManipulator, UniversalNetGraph, UniversalPinNode
+from .component_builder import ComponentDomBuilder
 from .models import (
     BiquadStageSpec,
     BodeConfig,
@@ -34,6 +35,8 @@ from .eda_engine import (
     PartPlacementSpec
 )
 from .schematic_builder import (
+    DatabaseBridgeError,
+    DatabaseDecryptionError,
     DbGraphicPrimitive,
     DbPartSpec,
     DbPinSpec,
@@ -52,6 +55,7 @@ __all__ = [
     "MultisimDOMManipulator",
     "UniversalNetGraph",
     "UniversalPinNode",
+    "ComponentDomBuilder",
     "BiquadStageSpec",
     "BodeConfig",
     "ComponentSpec",
@@ -78,6 +82,8 @@ __all__ = [
     "NativeEDAEngine",
     "NetConnectionSpec",
     "PartPlacementSpec",
+    "DatabaseBridgeError",
+    "DatabaseDecryptionError",
     "DbGraphicPrimitive",
     "DbPartSpec",
     "DbPinSpec",
