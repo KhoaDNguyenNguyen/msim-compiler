@@ -111,46 +111,39 @@ class OpticalCircuitParser:
         with open(image_path, "rb") as f:
             data = f.read()
 
-        if data[:8] == b"\x89PNG\r\n\x1a\n":
-            pos = 8
-            w, h, color_type = 0, 0, 2
-            idat_buf = bytearray()
-            while pos + 8 <= len(data):
-                length = struct.unpack(">I", data[pos:pos + 4])[0]
-                c_type = data[pos + 4:pos + 8]
-                c_data = data[pos + 8:pos + 8 + length]
-                pos += 12 + length
-                if c_type == b"IHDR":
-                    w, h, _, color_type, _, _, _ = struct.unpack(">IIBBBBB", c_data[:13])
-                elif c_type == b"IDAT":
-                    idat_buf.extend(c_data)
-                elif c_type == b"IEND":
-                    break
-            raw = zlib.decompress(bytes(idat_buf))
-            bpp = 1 if color_type == 0 else (3 if color_type == 2 else 4)
-            stride = w * bpp + 1
-            grid: List[List[int]] = []
-            for y in range(h):
-                row_start = y * stride + 1
-                row_vals: List[int] = []
-                for x in range(w):
-                    px_i = row_start + x * bpp
-                    if bpp == 1:
-                        row_vals.append(raw[px_i])
-                    else:
-                        r_v, g_v, b_v = raw[px_i], raw[px_i + 1], raw[px_i + 2]
-                        row_vals.append((77 * r_v + 150 * g_v + 29 * b_v) >> 8)
-                grid.append(row_vals)
-            return w, h, grid
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError(f"Unsupported or corrupted PNG header in '{image_path}'.")
 
-        w, h = 800, 500
-        tmp_png = image_path + ".norm.png"
-        self.generate_synthetic_schematic_png(tmp_png, w, h)
-        try:
-            return self._decode_image_grayscale(tmp_png)
-        finally:
-            if os.path.exists(tmp_png):
-                os.remove(tmp_png)
+        pos = 8
+        w, h, color_type = 0, 0, 2
+        idat_buf = bytearray()
+        while pos + 8 <= len(data):
+            length = struct.unpack(">I", data[pos:pos + 4])[0]
+            c_type = data[pos + 4:pos + 8]
+            c_data = data[pos + 8:pos + 8 + length]
+            pos += 12 + length
+            if c_type == b"IHDR":
+                w, h, _, color_type, _, _, _ = struct.unpack(">IIBBBBB", c_data[:13])
+            elif c_type == b"IDAT":
+                idat_buf.extend(c_data)
+            elif c_type == b"IEND":
+                break
+        raw = zlib.decompress(bytes(idat_buf))
+        bpp = 1 if color_type == 0 else (3 if color_type == 2 else 4)
+        stride = w * bpp + 1
+        grid: List[List[int]] = []
+        for y in range(h):
+            row_start = y * stride + 1
+            row_vals: List[int] = []
+            for x in range(w):
+                px_i = row_start + x * bpp
+                if bpp == 1:
+                    row_vals.append(raw[px_i])
+                else:
+                    r_v, g_v, b_v = raw[px_i], raw[px_i + 1], raw[px_i + 2]
+                    row_vals.append((77 * r_v + 150 * g_v + 29 * b_v) >> 8)
+            grid.append(row_vals)
+        return w, h, grid
 
     def _solve_laplacian_alignment(self, coords: List[float], anchors: List[float]) -> List[int]:
         n = len(coords)
@@ -184,15 +177,20 @@ class OpticalCircuitParser:
             self.generate_synthetic_schematic_png(image_path)
 
         w, h, gray = self._decode_image_grayscale(image_path)
-        ds = 4
+        ds = 2
+        r_erode = 4
         gw, gh = w // ds, h // ds
         fg_pts: List[Tuple[int, int]] = []
-        for gy in range(gh):
-            for gx in range(gw):
-                val = gray[gy * ds][gx * ds]
+        for gy in range(r_erode // ds, gh - (r_erode // ds)):
+            y = gy * ds
+            for gx in range(r_erode // ds, gw - (r_erode // ds)):
+                x = gx * ds
+                val = gray[y][x]
                 prob_fg = 1.0 / (1.0 + math.exp(0.12 * (val - 90.0)))
                 if prob_fg > 0.65:
-                    fg_pts.append((gx * ds, gy * ds))
+                    if (gray[y - r_erode][x] < 128 and gray[y + r_erode][x] < 128 and
+                        gray[y][x - r_erode] < 128 and gray[y][x + r_erode] < 128):
+                        fg_pts.append((x, y))
 
         n_pts = len(fg_pts)
         dsu = DisjointSetUnion(n_pts)
@@ -209,29 +207,19 @@ class OpticalCircuitParser:
 
         comp_blobs: List[Tuple[int, int, int, int, float, float]] = []
         for pts in clusters.values():
-            if len(pts) < 12:
+            if len(pts) < 10:
                 continue
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
-            bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
-            bw, bh = bx1 - bx0 + ds, by1 - by0 + ds
-            fill_density = (len(pts) * ds * ds) / float(max(1, bw * bh))
-            if fill_density >= 0.45 and 16 <= max(bw, bh) <= 160:
+            bx0, by0, bx1, by1 = min(xs) - r_erode, min(ys) - r_erode, max(xs) + r_erode, max(ys) + r_erode
+            bw, bh = bx1 - bx0, by1 - by0
+            if 12 <= max(bw, bh) <= 220:
                 cx = sum(xs) / float(len(xs))
                 cy = sum(ys) / float(len(ys))
                 comp_blobs.append((bx0, by0, bx1, by1, cx, cy))
 
-        if len(comp_blobs) < 3:
-            comp_blobs = [
-                (160, 175, 220, 195, 190.0, 185.0),
-                (310, 175, 370, 195, 340.0, 185.0),
-                (460, 175, 520, 195, 490.0, 185.0),
-                (610, 175, 670, 195, 640.0, 185.0),
-                (255, 260, 275, 320, 265.0, 290.0),
-                (405, 260, 425, 320, 415.0, 290.0),
-                (555, 260, 575, 320, 565.0, 290.0),
-                (385, 85,  445, 105, 415.0, 95.0)
-            ]
+        if not comp_blobs:
+            raise ValueError(f"OpticalCircuitParser detected 0 valid electronic components in '{image_path}'.")
 
         comp_blobs.sort(key=lambda b: (round(b[5] / 60.0), b[4]))
 
@@ -306,7 +294,7 @@ class OpticalCircuitParser:
             nets.append(NetConnectionSpec("0", [(sr, "2") for sr in shunt_refs]))
 
         self.logger.info(
-            f"Vision OCR extracted {len(parts)} components (Series={len(series_refs)}, Shunt={len(shunt_refs)}, Feedback={len(fb_refs)}) and {len(nets)} nets from '{os.path.basename(image_path)}'"
+            f"Vision OCR extracted {len(parts)} real components (Series={len(series_refs)}, Shunt={len(shunt_refs)}, Feedback={len(fb_refs)}) and {len(nets)} nets from '{os.path.basename(image_path)}'"
         )
         return parts, nets
 
@@ -318,11 +306,12 @@ class OpticalCircuitParser:
             title="=== OPTICAL CIRCUIT RECOGNITION (IMAGE-TO-MULTISIM) SYNTHESIZED TOPOLOGY ===",
             lines=[
                 f"Source Image: {os.path.basename(image_path)} | Extracted Components: {len(parts)} | Extracted Nets: {len(nets)}",
-                "Pipeline: Logistic Adaptive Threshold -> Disjoint-Set CCL -> Laplacian CG Grid Alignment -> A* Router"
+                "Pipeline: Morphological Opening -> Disjoint-Set CCL -> Laplacian CG Grid Alignment -> A* Router"
             ],
             x=324,
             y=486
         )
+        builder.validate_dom_integrity()
         doc = MS14Document(codec=builder.codec)
         doc.xml_text = builder.xml_text
         doc.auto_tune_all_instruments(
