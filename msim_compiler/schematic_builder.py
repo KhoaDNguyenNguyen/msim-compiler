@@ -413,7 +413,7 @@ class MultisimSchematicBuilder:
     def from_testbench(cls) -> "MultisimSchematicBuilder":
         pkg_dir = os.path.dirname(os.path.abspath(__file__))
         tb_path = os.path.join(pkg_dir, "templates", "instrument_testbench.ms14")
-        if os.path.exists(tb_path) and os.path.getsize(tb_path) < 200000:
+        if os.path.exists(tb_path) and os.path.getsize(tb_path) < 1000000:
             return cls(template_ms14_path=tb_path).prune_to_instruments_only()
         builder = cls(template_ms14_path=os.path.join(pkg_dir, "templates", "base_sallen_key.ms14"))
         return builder.prune_to_instruments_only()
@@ -707,7 +707,7 @@ class MultisimSchematicBuilder:
         self.xml_text = self.xml_text.replace("\r\n", "\n")
         self.eda.reset_grid()
 
-        if "495898448" not in self.xml_text and "495902816" not in self.xml_text and len(self.xml_text) < 1000000 and set(self.net_nodes.keys()) == {"0", "VIN", "VOUT"}:
+        if "495898448" not in self.xml_text and "495902816" not in self.xml_text and len(self.xml_text) < 3500000 and set(self.net_nodes.keys()) == {"0", "VIN", "VOUT"}:
             self._cleanup_orphaned_dom_links()
             self._synchronize_testbench_virtual_connectors_dom()
             self.net_nodes.clear()
@@ -1754,6 +1754,27 @@ class MultisimSchematicBuilder:
         for (c1, p1), (c2, p2) in plan.point_to_point_edges:
             wid = self.connect_pins(c1, p1, c2, p2, net_name=net_name)
             wire_ids.append(wid)
+
+        if net_name == "0":
+            for cref, pkey in terminals:
+                if cref in self.placed_components and re.match(r'^[RCL]\d+$', cref, re.IGNORECASE):
+                    c_inst = self.placed_components[cref]
+                    if pkey in c_inst.pins:
+                        p_name = c_inst.pins[pkey].pin_name
+                        root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
+                        for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
+                            comp = item.find("CiComponent")
+                            if comp is not None and comp.attrib.get("LocalName") == f"&ASC{cref}":
+                                exprt = comp.find(".//CiaSpiceTmpltExprt")
+                                if exprt is not None:
+                                    raw_s = exprt.attrib.get("String", "")
+                                    body_s = raw_s[4:] if raw_s.startswith("&ASC") else raw_s
+                                    tie_line = f"r_gnd_%p_{p_name} %t{p_name} 0 1e-9"
+                                    if tie_line not in body_s:
+                                        new_body = body_s.rstrip() + "__MSIM_CRLF__" + tie_line
+                                        exprt.set("String", "&ASC" + new_body)
+                                break
+                        self.xml_text = ComponentDomBuilder.serialize_element(root)
         return wire_ids
 
     def synthesize_topology(
@@ -1792,7 +1813,7 @@ class MultisimSchematicBuilder:
                     max_x = max(po.world_x for po in pin_objs)
                     right_ys = [po.world_y for po in pin_objs if po.world_x == max_x]
                     horiz_ys = [po.world_y for po in pin_objs if po.lead_x != po.world_x]
-                    out_y = max(horiz_ys) if horiz_ys else (min(right_ys) if right_ys else pin_objs[0].world_y)
+                    out_y = min(horiz_ys) if horiz_ys else (min(right_ys) if right_ys else pin_objs[0].world_y)
                     t_key = self.place_terminal_connector("VOUT", max_x + 27, out_y, is_input=False)
                     if len(terms) == 1:
                         self.connect_pins(terms[0][0], terms[0][1], t_key, "1", net_name="VOUT")
