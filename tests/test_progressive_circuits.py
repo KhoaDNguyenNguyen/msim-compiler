@@ -26,7 +26,7 @@ def make_multitone_resistor_spice(harmonics: List[HarmonicTone]) -> str:
     for idx, tone in enumerate(extra):
         n_in = "%t1" if idx == 0 else f"n_mt_{idx}_%p"
         n_out = f"n_mt_{idx + 1}_%p"
-        f_sp = tone.freq_hz * 1e-6
+        f_sp = tone.freq_hz
         lines.append(f"v_mt_{idx + 1}_%p {n_in} {n_out} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {f_sp:.12e} 0)")
     last_node = f"n_mt_{len(extra)}_%p"
     lines.append(f"r%p {last_node} %t2 \x231")

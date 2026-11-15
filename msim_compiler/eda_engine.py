@@ -127,16 +127,21 @@ class AffineGrid2D:
                 dedup.append(pt)
         if len(dedup) < 3:
             return dedup
-        simplified: List[Tuple[int, int]] = [dedup[0]]
-        for i in range(1, len(dedup) - 1):
-            prv = simplified[-1]
-            cur = dedup[i]
-            nxt = dedup[i + 1]
-            if (prv[0] == cur[0] == nxt[0]) or (prv[1] == cur[1] == nxt[1]):
-                continue
-            simplified.append(cur)
-        simplified.append(dedup[-1])
-        return simplified
+        changed = True
+        while changed and len(dedup) >= 3:
+            changed = False
+            cleaned: List[Tuple[int, int]] = [dedup[0]]
+            for i in range(1, len(dedup) - 1):
+                prv = cleaned[-1]
+                cur = dedup[i]
+                nxt = dedup[i + 1]
+                if (prv[0] == cur[0] == nxt[0]) or (prv[1] == cur[1] == nxt[1]):
+                    changed = True
+                    continue
+                cleaned.append(cur)
+            cleaned.append(dedup[-1])
+            dedup = cleaned
+        return dedup
 
 class NativeEDAEngine:
     def __init__(
