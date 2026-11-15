@@ -27,6 +27,7 @@ class FuncGenConfig:
     duty_cycle: float = 50.0
     offset_v: float = 0.0
     harmonics: List[HarmonicTone] = field(default_factory=list)
+    injection_target: Optional[str] = None
 
 @dataclass
 class ScopeConfig:

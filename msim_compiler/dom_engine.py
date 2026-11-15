@@ -101,7 +101,8 @@ class MultisimDOMManipulator:
         xml_text: str,
         freq_hz: float,
         amplitude_vp: float,
-        harmonics: List[HarmonicTone]
+        harmonics: List[HarmonicTone],
+        injection_target: Optional[str] = None
     ) -> str:
         root = cls.parse_dom_preserving_multiline_attrs(xml_text)
         elements_node = root.find(".//CIITDiagram/Elements")
@@ -191,29 +192,79 @@ class MultisimDOMManipulator:
                     "LastLocalName": "&ASCVGEN"
                 })
 
-        extra_tones = harmonics[1:]
-        ext_lines: List[str] = []
-        for idx, tone in enumerate(extra_tones):
-            nin = "VGEN" if idx == 0 else f"n_harm_{idx}"
-            nout = "%t1" if idx == len(extra_tones) - 1 else f"n_harm_{idx+1}"
-            ext_lines.append(
-                f"v_harm_{idx+1} {nout} {nin} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {tone.freq_hz:.12e} 0)"
-            )
+        vin_ports_set = set()
+        for item in elements_node.findall("Item[@Class='CiNode']"):
+            cn = item.find("CiNode")
+            if cn is not None and cn.attrib.get("LocalName") == "&ASCVIN":
+                for p_it in cn.findall("./Ports/Item"):
+                    pid = p_it.attrib.get("CiID", "")
+                    if pid:
+                        vin_ports_set.add(pid)
 
-        for item in elements_node.findall("Item[@Class='CiComponent']"):
-            comp_el = item.find("CiComponent")
-            if comp_el is None:
-                continue
-            lname = comp_el.attrib.get("LocalName", "")
-            if lname in ("&ASCR1", "&ASCR10"):
+        comp_id_to_vin_pin = {}
+        for item in elements_node.findall("Item[@Class='CiPort']"):
+            pid = item.attrib.get("CiID", "")
+            if pid in vin_ports_set:
+                cp = item.find("CiPort")
+                if cp is not None:
+                    cid = cp.attrib.get("Component", "")
+                    pname = cp.attrib.get("LocalName", "")
+                    clean_pname = pname[4:] if pname.startswith("&ASC") else pname
+                    if cid and clean_pname and clean_pname != "Dummy_VR_Pin":
+                        comp_id_to_vin_pin[cid] = clean_pname
+
+        target_comp_el = None
+        target_pin_token = "%t1"
+
+        if injection_target:
+            wanted_lname = f"&ASC{injection_target}" if not injection_target.startswith("&ASC") else injection_target
+            for item in elements_node.findall("Item[@Class='CiComponent']"):
+                cid = item.attrib.get("CiID", "")
+                comp_el = item.find("CiComponent")
+                if comp_el is not None and comp_el.attrib.get("LocalName") == wanted_lname:
+                    target_comp_el = comp_el
+                    if cid in comp_id_to_vin_pin:
+                        target_pin_token = f"%t{comp_id_to_vin_pin[cid]}"
+                    break
+
+        if target_comp_el is None:
+            candidates = []
+            for item in elements_node.findall("Item[@Class='CiComponent']"):
+                cid = item.attrib.get("CiID", "")
+                if cid not in comp_id_to_vin_pin:
+                    continue
+                comp_el = item.find("CiComponent")
+                if comp_el is None:
+                    continue
+                lname = comp_el.attrib.get("LocalName", "")
+                clean_ref = lname[4:] if lname.startswith("&ASC") else lname
+                if clean_ref.upper().startswith(("XFG", "XSC", "XBP", "VIN", "VOUT", "VGEN", "0", "GND")):
+                    continue
                 exprt_el = comp_el.find(".//CiaSpiceTmpltExprt")
                 if exprt_el is not None:
-                    raw_str = exprt_el.attrib.get("String", "&ASCr%p %t1 %t2 #1")
-                    body = raw_str[4:] if raw_str.startswith("&ASC") else raw_str
-                    body = body.replace(CRLF_TOKEN, LF).replace(LF_TOKEN, LF)
-                    clean_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("v_harm_")]
-                    final_lines = ext_lines + clean_lines
-                    exprt_el.set("String", "&ASC" + CRLF_TOKEN.join(final_lines) + CRLF_TOKEN)
-                    break
+                    prio = 0 if clean_ref.upper().startswith("R") else (1 if clean_ref.upper().startswith(("L", "C")) else 2)
+                    candidates.append((prio, clean_ref, comp_el, f"%t{comp_id_to_vin_pin[cid]}"))
+            if candidates:
+                candidates.sort(key=lambda x: (x[0], x[1]))
+                target_comp_el = candidates[0][2]
+                target_pin_token = candidates[0][3]
+
+        if target_comp_el is not None:
+            extra_tones = harmonics[1:]
+            ext_lines: List[str] = []
+            for idx, tone in enumerate(extra_tones):
+                nin = "VGEN" if idx == 0 else f"n_harm_{idx}"
+                nout = target_pin_token if idx == len(extra_tones) - 1 else f"n_harm_{idx+1}"
+                ext_lines.append(
+                    f"v_harm_{idx+1} {nout} {nin} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {tone.freq_hz:.12e} 0)"
+                )
+            exprt_el = target_comp_el.find(".//CiaSpiceTmpltExprt")
+            if exprt_el is not None:
+                raw_str = exprt_el.attrib.get("String", "&ASCr%p %t1 %t2 #1")
+                body = raw_str[4:] if raw_str.startswith("&ASC") else raw_str
+                body = body.replace(CRLF_TOKEN, LF).replace(LF_TOKEN, LF)
+                clean_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("v_harm_")]
+                final_lines = ext_lines + clean_lines
+                exprt_el.set("String", "&ASC" + CRLF_TOKEN.join(final_lines) + CRLF_TOKEN)
 
         return cls.serialize_dom_restoring_multiline_attrs(root)
