@@ -1,7 +1,9 @@
 from .dom_engine import MultisimDOMManipulator
+from .component_builder import ComponentDomBuilder
 import math
 import os
 import re
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 from .codec import MS14Codec
 from .logger import get_logger
@@ -45,6 +47,7 @@ class MS14Document:
         return self
 
     def save(self, ms14_out_path: str, save_xml_path: Optional[str] = None) -> "MS14Document":
+        MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
         if save_xml_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_xml_path)), exist_ok=True)
             with open(save_xml_path, "wb") as f:
@@ -53,36 +56,52 @@ class MS14Document:
         return self
 
     def discover_components(self) -> Dict[str, ComponentSpec]:
-        comp_pat = re.compile(
-            r'<Item\s+CiID="(\d+)"\s+Class="CiComponent">\s*<CiComponent\s+[^>]*LocalName="&amp;ASC([^"]+)"[^>]*>(.*?)</CiComponent>\s*</Item>',
-            re.DOTALL
-        )
-        sym_pat = re.compile(
-            r'<CIITSymbolComp\s+[^>]*Transformer-M20="([^"]+)"\s+Transformer-M21="([^"]+)"[^>]*CiComponent="(\d+)"[^>]*>(.*?)</CIITSymbolComp>',
-            re.DOTALL
-        )
+        root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
         sym_map = {}
-        for sm in sym_pat.finditer(self.xml_text):
-            x_s, y_s, ci_id, sbody = sm.groups()
-            val_m = re.search(r'<CIITSymTextCompValue\s+[^>]*Output="([^"]+)"', sbody)
-            lbl = val_m.group(1) if val_m else ""
-            sym_map[ci_id] = (float(x_s), float(y_s), lbl)
+        for item in root.findall(".//CODComposite/Objects/Item[@Class='CIITSymbolComp']"):
+            sym = item.find("CIITSymbolComp")
+            if sym is None:
+                continue
+            ci_id = sym.attrib.get("CiComponent", "")
+            x_s = float(sym.attrib.get("Transformer-M20", "0"))
+            y_s = float(sym.attrib.get("Transformer-M21", "0"))
+            val_el = sym.find(".//CIITSymTextCompValue")
+            lbl = val_el.attrib.get("Output", "").replace("&", "&amp;") if val_el is not None else ""
+            sym_map[ci_id] = (x_s, y_s, lbl)
 
         result: Dict[str, ComponentSpec] = {}
-        for cm in comp_pat.finditer(self.xml_text):
-            ci_id, refdes, cbody = cm.groups()
-            params = re.findall(r'<Item\s+Value="&amp;ASC([^"]+)"\s*/>', cbody)
-            spice_val = params[1] if len(params) > 1 else ""
+        for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
+            ci_id = item.attrib.get("CiID", "")
+            comp = item.find("CiComponent")
+            if comp is None:
+                continue
+            lname = comp.attrib.get("LocalName", "")
+            refdes = lname[4:] if lname.startswith("&ASC") else lname
+            if not refdes:
+                continue
+            spice_val = ""
+            for plist in comp.findall(".//CiaParamList") + comp.findall(".//CiaProperDlg"):
+                asc_items = [it for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
+                if len(asc_items) >= 2:
+                    raw_v = asc_items[1].attrib.get("Value", "")
+                    cand_v = raw_v[4:] if raw_v.startswith("&ASC") else raw_v
+                    if cand_v:
+                        spice_val = cand_v
+                        break
             x_v, y_v, lbl = sym_map.get(ci_id, (0.0, 0.0, ""))
             result[refdes] = ComponentSpec(refdes, ci_id, spice_val, lbl, x_v, y_v)
         return result
 
     def discover_wires(self) -> List[WireSegment]:
-        w_pat = re.compile(r'<CODMultiLineComp\s+[^>]*>(.*?)</CODMultiLineComp>', re.DOTALL)
+        root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
         wires: List[WireSegment] = []
-        for idx, wm in enumerate(w_pat.finditer(self.xml_text), start=1):
-            pts_raw = re.findall(r'<Item\s+X="([^"]+)"\s+Y="([^"]+)"\s*/>', wm.group(1))
-            wires.append(WireSegment(idx, [(float(px), float(py)) for px, py in pts_raw]))
+        idx = 1
+        for lk in root.findall(".//CODComposite/Objects/Item[@Class='CIITLinkComp']/CIITLinkComp"):
+            pts_el = lk.find("Points")
+            if pts_el is not None:
+                pts = [(float(pt.attrib.get("X", "0")), float(pt.attrib.get("Y", "0"))) for pt in pts_el.findall("Item")]
+                wires.append(WireSegment(idx, pts))
+                idx += 1
         return wires
 
     @staticmethod
@@ -106,64 +125,38 @@ class MS14Document:
 
     def set_component(self, refdes: str, spice_val: str, display_label: Optional[str] = None) -> "MS14Document":
         disp = display_label or self.format_display_label(refdes, spice_val)
-        comp_pat = re.compile(
-            r'(<Item\s+CiID="(\d+)"\s+Class="CiComponent">\s*<CiComponent\s+[^>]*LocalName="&amp;ASC' + re.escape(refdes) + r'"[^>]*>.*?</CiComponent>\s*</Item>)',
-            re.DOTALL
-        )
-        m = comp_pat.search(self.xml_text)
-        if not m:
+        disp_unesc = ComponentDomBuilder.unesc(disp)
+        num_v = MultisimDOMManipulator.parse_si_value(str(spice_val))
+
+        root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
+        target_ci_id = ""
+        for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
+            comp = item.find("CiComponent")
+            if comp is not None and comp.attrib.get("LocalName") == f"&ASC{refdes}":
+                target_ci_id = item.attrib.get("CiID", "")
+                for plist in comp.findall(".//CiaParamList") + comp.findall(".//CiaProperDlg"):
+                    dbl = plist.find(".//doubles/Item")
+                    if dbl is not None:
+                        dbl.set("Value", f"{num_v:g}")
+                    s_items = [it for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
+                    if len(s_items) >= 2:
+                        s_items[1].set("Value", f"&ASC{spice_val}")
+                break
+
+        if not target_ci_id:
             self.logger.warning(f"Component '{refdes}' not found in XML DOM.")
             return self
 
-        full_block, ci_id = m.group(1), m.group(2)
+        for item in root.findall(".//CODComposite/Objects/Item[@Class='CIITSymbolComp']"):
+            sym = item.find("CIITSymbolComp")
+            if sym is not None and sym.attrib.get("CiComponent") == target_ci_id:
+                val_el = sym.find(".//CIITSymTextCompValue")
+                if val_el is not None:
+                    val_el.set("Output", disp_unesc)
+                break
 
-        def parse_si_num(v_s: str) -> float:
-            s = v_s.strip().rstrip("FHOhm")
-            m_n = re.match(r'^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([a-zA-Z]*)$', s)
-            if not m_n:
-                return 1000.0
-            mult = {"G": 1e9, "M": 1e6, "k": 1e3, "K": 1e3, "": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12}.get(m_n.group(2), 1.0)
-            return float(m_n.group(1)) * mult
-
-        num_v = parse_si_num(str(spice_val))
-
-        def replace_params(pm):
-            p_block = pm.group(0)
-            p_block = re.sub(
-                r'(<doubles>\s*<Item\s+Value=")[^"]+("\s*/>)',
-                rf'\g<1>{num_v:g}\g<2>',
-                p_block, count=1
-            )
-            items = list(re.finditer(r'(<Item\s+Value="&amp;ASC)([^"]+)("\s*/>)', p_block))
-            if len(items) >= 2:
-                t_item = items[1]
-                s_i, e_i = t_item.span()
-                p_block = p_block[:s_i] + t_item.group(1) + str(spice_val) + t_item.group(3) + p_block[e_i:]
-            return p_block
-
-        new_block = re.sub(
-            r'<CiaParamList\s+Class="CiaParamList">.*?</CiaParamList>',
-            replace_params, full_block, count=1, flags=re.DOTALL
-        )
-        new_block = re.sub(
-            r'<CiaProperDlg\s+Class="CiaProperDlg"[^>]*>.*?</CiaProperDlg>',
-            replace_params, new_block, count=1, flags=re.DOTALL
-        )
-        self.xml_text = self.xml_text[:m.start()] + new_block + self.xml_text[m.end():]
-
-        sym_pat = re.compile(
-            r'(<CIITSymbolComp\s+[^>]*CiComponent="' + re.escape(ci_id) + r'"[^>]*>.*?</CIITSymbolComp>)',
-            re.DOTALL
-        )
-        sm = sym_pat.search(self.xml_text)
-        if sm:
-            new_s_block = re.sub(
-                r'(<CIITSymTextCompValue\s+[^>]*Output=")([^"]+)(")',
-                r'\g<1>' + disp + r'\g<3>', sm.group(1)
-            )
-            self.xml_text = self.xml_text[:sm.start()] + new_s_block + self.xml_text[sm.end():]
-
-        self.logger.info(f"Updated Component [{refdes}] (CiID={ci_id}) -> SPICE='{spice_val}', Label='{disp}'")
+        self.xml_text = ComponentDomBuilder.serialize_element(root)
+        self.logger.info(f"Updated Component [{refdes}] (CiID={target_ci_id}) via DOM -> SPICE='{spice_val}', Label='{disp}'")
         return self
 
     def apply_high_order_filter_design(self, design: HighOrderFilterDesign) -> "MS14Document":
@@ -178,19 +171,10 @@ class MS14Document:
         self.set_component("C1", c1_str)
         self.set_component("C2", c2_str)
 
-        comp_pat = re.compile(
-            r'(<Item\s+CiID="\d+"\s+Class="CiComponent">\s*<CiComponent\s+[^>]*LocalName="&amp;ASCR1"[^>]*>.*?</CiComponent>\s*</Item>)',
-            re.DOTALL
+        self.xml_text = MultisimDOMManipulator.update_spice_template_for_component(
+            self.xml_text, "R1", design.pre_filter_spice_netlist + "\r\n"
         )
-        m = comp_pat.search(self.xml_text)
-        if m:
-            new_r1_block = re.sub(
-                r'(<CiaSpiceTmpltExprt\s+Class="CiaSpiceTmpltExprt"\s+String="&amp;ASC)([^"]+)(")',
-                lambda tm: tm.group(1) + design.pre_filter_spice_netlist + "\r\n" + tm.group(3),
-                m.group(1), count=1
-            )
-            self.xml_text = self.xml_text[:m.start()] + new_r1_block + self.xml_text[m.end():]
-            self.logger.info(f"Injected {len(design.stages)-1} pre-filter SPICE cascade stage(s) into R1 template.")
+        self.logger.info(f"Injected {len(design.stages)-1} pre-filter SPICE cascade stage(s) into R1 template.")
         return self
 
     def set_cdata_key(self, key_name: str, new_val: str) -> int:
@@ -267,13 +251,6 @@ class MS14Document:
                 re.DOTALL
             )
             return kpat.sub(r'\g<1>' + str(val_str) + r'\g<3>', blk)
-
-        empty_setup_list = (
-            '<Element Key="&amp;ASCNI_EWB_SETUPDATALIST">\n'
-            '<CDataElement Class="CDataElement" Type="4" Data="0">\n<Elements>\n'
-            + ('<CDataElement Class="CDataElement" Type="5" Data=""/>\n' * 11)
-            + '</Elements>\n</CDataElement>\n</Element>'
-        )
 
         for idx in range(min(len(node_matches), len(configs)) - 1, -1, -1):
             nm = node_matches[idx]
