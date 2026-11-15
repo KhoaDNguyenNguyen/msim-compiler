@@ -141,6 +141,19 @@ class MS14Document:
                     s_items = [it for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
                     if len(s_items) >= 2:
                         s_items[1].set("Value", f"&ASC{spice_val}")
+                exprt = comp.find(".//CiaSpiceTmpltExprt")
+                if exprt is not None and re.match(r'^[RCL]\d+$', refdes, re.IGNORECASE):
+                    raw_s = exprt.attrib.get("String", "")
+                    body_s = raw_s[4:] if raw_s.startswith("&ASC") else raw_s
+                    lead_c = refdes[0].lower()
+                    body_s = re.sub(
+                        rf'^({lead_c}%p\s+%t\S+\s+%t\S+\s+)(?:#1|[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)',
+                        rf'\g<1>{num_v:.6e}',
+                        body_s,
+                        count=1,
+                        flags=re.IGNORECASE | re.MULTILINE
+                    )
+                    exprt.set("String", "&ASC" + body_s)
                 break
 
         if not target_ci_id:
@@ -195,7 +208,8 @@ class MS14Document:
             self.xml_text,
             freq_hz=cfg.freq_hz,
             amplitude_vp=cfg.amplitude_vp,
-            harmonics=cfg.harmonics or []
+            harmonics=cfg.harmonics or [],
+            injection_target=cfg.injection_target
         )
         if cfg.harmonics:
             tones_desc = ", ".join(f"{t.freq_hz/1000.0:.1f}kHz({t.amplitude_vp}Vp)" for t in cfg.harmonics)
@@ -356,7 +370,8 @@ class MS14Document:
         fc_hz: float,
         fundamental_hz: Optional[float] = None,
         harmonics: Optional[List[HarmonicTone]] = None,
-        vim_vp: float = 1.4
+        vim_vp: float = 1.4,
+        injection_target: Optional[str] = None
     ) -> "MS14Document":
         label_map = {
             "XSC1": "XSC1 (Time Scope)",
@@ -380,7 +395,7 @@ class MS14Document:
         opt_fft_hz = min(TEK_FFT_HZ_STEPS, key=lambda s: abs(math.log10(s / max(10.0, raw_fft_step))))
         opt_fft_center = opt_fft_hz * 5
 
-        self.configure_function_generator(FuncGenConfig(freq_hz=f_wave, amplitude_vp=vim_vp, harmonics=harmonics or []))
+        self.configure_function_generator(FuncGenConfig(freq_hz=f_wave, amplitude_vp=vim_vp, harmonics=harmonics or [], injection_target=injection_target))
         self.configure_oscilloscope(ScopeConfig(timebase_scale_s=opt_scope_tb, ch_a_scale_v=1.0, ch_b_scale_v=1.0))
         self.configure_bode_plotter(BodeConfig(cursor_freq_hz=fc_hz))
 
