@@ -1,6 +1,7 @@
 import copy
 import os
 import re
+import uuid
 import xml.etree.ElementTree as ET
 from typing import Callable, Dict, List, Optional, Tuple
 from .codec import MS14Codec
@@ -60,6 +61,7 @@ class ComponentDomBuilder:
         root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(xml_str)
         schema_root = ET.Element("MultisimCArchiveSchema")
 
+        gnd_sym_id = ""
         for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
             comp = item.find("CiComponent")
             if comp is None:
@@ -83,12 +85,23 @@ class ComponentDomBuilder:
             elif "GROUND" not in [c.attrib.get("SkeletonKey") for c in schema_root]:
                 raw_sub = ET.tostring(comp, encoding="unicode")
                 if "POWER_SOURCES" in raw_sub and "GROUND" in raw_sub:
+                    gnd_sym_id = comp.attrib.get("SymCompID", "")
                     sk_gnd = copy.deepcopy(comp)
                     ports_el = sk_gnd.find("Ports")
                     if ports_el is not None:
                         ports_el.clear()
                     wrap = ET.SubElement(schema_root, "Skeleton", {"SkeletonKey": "GROUND"})
                     wrap.append(sk_gnd)
+
+        if gnd_sym_id:
+            for obj_item in root.findall(".//CODComposite/Objects/Item[@Class='CIITSymbolComp']"):
+                if obj_item.attrib.get("ID") == gnd_sym_id:
+                    sk_gnd_sym = copy.deepcopy(obj_item)
+                    for cl in sk_gnd_sym.findall(".//ConnectList"):
+                        cl.clear()
+                    wrap_gs = ET.SubElement(schema_root, "Skeleton", {"SkeletonKey": "GROUND_SYM"})
+                    wrap_gs.append(sk_gnd_sym)
+                    break
 
         for obj_item in root.findall(".//CODComposite/Objects/Item[@Class='CVirtualConnector']"):
             vc_el = obj_item.find("CVirtualConnector")
@@ -137,7 +150,9 @@ class ComponentDomBuilder:
                     el.set("Value", "&ASC__MSIM_FUNC_DESC__")
                 elif val in ("&ASCCapacitor", "&ASCResistor"):
                     el.set("Value", "&ASC__MSIM_TYPE_LABEL__")
-                elif val in ("&ASC31", "&ASC29"):
+                elif val in ("&ASCF", "&UNI_uc103a9"):
+                    el.set("Value", "__MSIM_UNIT_SYM__")
+                elif val in ("&ASC31", "&ASC29", "&ASC172", "&ASC173"):
                     el.set("Value", "&ASC__MSIM_FAM_ID__")
                 elif val in ("&ASCC%d", "&ASCR%d"):
                     el.set("Value", "&ASC__MSIM_REF_TPL__")
@@ -145,10 +160,12 @@ class ComponentDomBuilder:
                     el.set("Value", "__MSIM_DISP_VAL__")
                 elif val in ("&ASC1.5n", "&ASC6.8k"):
                     el.set("Value", "&ASC__MSIM_SPICE_VAL__")
+                elif val.startswith("&ASCr%p") or val.startswith("&ASCc%p") or val.startswith("&ASCl%p"):
+                    el.set("Value", "&ASC__MSIM_SPICE_TPL__")
         for plist in comp_el.findall(".//CiaParamList") + comp_el.findall(".//CiaProperDlg"):
-            dbl = plist.find(".//doubles/Item")
-            if dbl is not None:
-                dbl.set("Value", "__MSIM_NUM_VAL__")
+            for dbl in plist.findall(".//doubles/Item"):
+                if "Value" in dbl.attrib:
+                    dbl.set("Value", "__MSIM_NUM_VAL__")
 
     @staticmethod
     def _sanitize_active_skeleton(comp_el: ET.Element) -> None:
@@ -189,8 +206,10 @@ class ComponentDomBuilder:
         for el in item_el.iter():
             if el.tag == "CIITSymTextCompName":
                 el.set("Output", "&ASC__MSIM_NET_NAME__")
-            elif el.tag == "Item" and el.attrib.get("Value") in ("&ASCVIN", "&ASCVOUT", "&ASCVGEN"):
+            elif el.tag == "Item" and el.attrib.get("Value") in ("&ASCVIN", "&ASCVOUT", "&ASCVGEN", "&ASCVin", "&ASCVout"):
                 el.set("Value", "&ASC__MSIM_NET_NAME__")
+                if "Guid" in el.attrib:
+                    el.set("Guid", "__MSIM_VCONN_MOD_GUID__")
             elif el.tag == "ConnectList":
                 el.clear()
 
@@ -203,37 +222,36 @@ class ComponentDomBuilder:
         if ports_el is not None:
             ports_el.clear()
         for el in comp_el.iter():
-            if el.tag == "Item" and el.attrib.get("Value") in ("&ASCVIN", "&ASCVOUT", "&ASCVGEN"):
+            if el.tag == "Item" and el.attrib.get("Value") in ("&ASCVIN", "&ASCVOUT", "&ASCVGEN", "&ASCVin", "&ASCVout"):
                 el.set("Value", "&ASC__MSIM_NET_NAME__")
 
     def _build_pure_dom_fallback_skeletons(self) -> None:
         pas = ET.Element("CiComponent", {"Class": "CiComponent"})
         attrs_p = ET.SubElement(pas, "Attributes")
         ET.SubElement(attrs_p, "Item")
+        it_sp = ET.SubElement(attrs_p, "Item")
+        ET.SubElement(it_sp, "CiaSpiceTmpltExprt", {"Class": "CiaSpiceTmpltExprt", "String": "&ASC__MSIM_SPICE_TPL__"})
+        it_pl = ET.SubElement(attrs_p, "Item")
+        pl = ET.SubElement(it_pl, "CiaParamList", {"Class": "CiaParamList"})
+        ET.SubElement(pl, "doubles")
+        ET.SubElement(pl, "strings")
+        prms = ET.SubElement(pl, "parameters")
+        ET.SubElement(prms, "Item", {"Value": "&ASC0"})
+        ET.SubElement(prms, "Item", {"Value": "&ASC__MSIM_SPICE_VAL__"})
+        ET.SubElement(pl, "paramindicators")
+        ET.SubElement(attrs_p, "Item")
         it_cs = ET.SubElement(attrs_p, "Item")
         cs = ET.SubElement(it_cs, "CiaCollString", {"Class": "CiaCollString"})
         strs = ET.SubElement(cs, "strings")
-        for tok in ("&ASCBasic", "&ASC__MSIM_COMP_NAME__", "&ASC__MSIM_COMP_NAME__", "&ASC__MSIM_FUNC_DESC__", "&ASC__MSIM_FAM_ID__", "&ASC__MSIM_REF_TPL__"):
+        for tok in ("&ASC__MSIM_FAM_SHORT__", "&ASC__MSIM_COMP_NAME__", "&ASC__MSIM_FAM_SHORT__", "&ASC__MSIM_FUNC_DESC__", "&ASC__MSIM_TYPE_LABEL__", "&ASC__MSIM_FAM_ID__", "&ASC__MSIM_REF_TPL__", "&ASC__MSIM_SPICE_TPL__"):
             ET.SubElement(strs, "Item", {"Value": tok})
-        it_pl = ET.SubElement(attrs_p, "Item")
-        pl = ET.SubElement(it_pl, "CiaParamList", {"Class": "CiaParamList"})
-        dbls = ET.SubElement(pl, "doubles")
-        ET.SubElement(dbls, "Item", {"Value": "__MSIM_NUM_VAL__"})
-        p_strs = ET.SubElement(pl, "strings")
-        ET.SubElement(p_strs, "Item", {"Value": "__MSIM_DISP_VAL__"})
-        ET.SubElement(p_strs, "Item", {"Value": "&ASC__MSIM_SPICE_VAL__"})
-        ET.SubElement(pl, "parameters")
-        ET.SubElement(pl, "paramindicators")
-        it_sp = ET.SubElement(attrs_p, "Item")
-        ET.SubElement(it_sp, "CiaSpiceTmpltExprt", {"Class": "CiaSpiceTmpltExprt", "String": "&ASC__MSIM_SPICE_TPL__"})
         it_dlg = ET.SubElement(attrs_p, "Item")
         dlg = ET.SubElement(it_dlg, "CiaProperDlg", {"Class": "CiaProperDlg"})
-        dbls2 = ET.SubElement(dlg, "doubles")
-        ET.SubElement(dbls2, "Item", {"Value": "__MSIM_NUM_VAL__"})
-        p_strs2 = ET.SubElement(dlg, "strings")
-        ET.SubElement(p_strs2, "Item", {"Value": "__MSIM_DISP_VAL__"})
-        ET.SubElement(p_strs2, "Item", {"Value": "&ASC__MSIM_SPICE_VAL__"})
-        ET.SubElement(dlg, "parameters")
+        ET.SubElement(dlg, "doubles")
+        ET.SubElement(dlg, "strings")
+        prms2 = ET.SubElement(dlg, "parameters")
+        ET.SubElement(prms2, "Item", {"Value": "&ASC0"})
+        ET.SubElement(prms2, "Item", {"Value": "&ASC__MSIM_SPICE_VAL__"})
         ET.SubElement(dlg, "paramindicators")
         it_dbl = ET.SubElement(attrs_p, "Item")
         ET.SubElement(it_dbl, "CiaDOUBLE", {"Class": "CiaDOUBLE", "Double": "__MSIM_CIA_DBL__"})
@@ -272,7 +290,7 @@ class ComponentDomBuilder:
 
         if is_ground:
             local_ref_name = "0"
-            inst_ref_attr = "&ASC0"
+            inst_ref_attr = ""
             lbl_sel_attr = "0"
             sk_comp = copy.deepcopy(self._skeletons.get("GROUND", self._skeletons["PASSIVE_VIRTUAL"]))
         elif is_passive_virtual:
@@ -293,6 +311,7 @@ class ComponentDomBuilder:
                 fam_short_str = "CAPACITOR"
                 func_desc_str = "VIRTUAL_CAPACITANCE"
                 type_lbl_str = "Capacitor"
+                unit_sym_str = "&ASCF"
             elif is_inductor:
                 eff_spice_tpl = f"l%p %t1 %t2 {num_val:.6e}"
                 fam_id_str = str(part.family_id if part.family_id and part.family_id != 29 else 30)
@@ -302,6 +321,7 @@ class ComponentDomBuilder:
                 fam_short_str = "INDUCTOR"
                 func_desc_str = "VIRTUAL_INDUCTANCE"
                 type_lbl_str = "Inductor"
+                unit_sym_str = "&ASCH"
             else:
                 eff_spice_tpl = f"r%p %t1 %t2 {num_val:.6e}"
                 fam_id_str = str(part.family_id or 29)
@@ -311,6 +331,7 @@ class ComponentDomBuilder:
                 fam_short_str = "RESISTOR"
                 func_desc_str = "VIRTUAL_RESISTANCE"
                 type_lbl_str = "Resistor"
+                unit_sym_str = "&UNI_uc103a9"
 
             token_map = {
                 "&ASC__MSIM_SPICE_TPL__": f"&ASC{eff_spice_tpl}",
@@ -319,6 +340,7 @@ class ComponentDomBuilder:
                 "&ASC__MSIM_FAM_SHORT__": f"&ASC{fam_short_str}",
                 "&ASC__MSIM_FUNC_DESC__": f"&ASC{func_desc_str}",
                 "&ASC__MSIM_TYPE_LABEL__": f"&ASC{type_lbl_str}",
+                "__MSIM_UNIT_SYM__": unit_sym_str,
                 "&ASC__MSIM_FAM_ID__": f"&ASC{fam_id_str}",
                 "&ASC__MSIM_REF_TPL__": f"&ASC{ref_tpl_str}",
                 "__MSIM_DISP_VAL__": self.unesc(disp_val),
@@ -333,9 +355,12 @@ class ComponentDomBuilder:
                     el.set("String", f"&ASC{eff_spice_tpl}")
 
             for plist in sk_comp.findall(".//CiaParamList") + sk_comp.findall(".//CiaProperDlg"):
-                dbl_item = plist.find(".//doubles/Item")
-                if dbl_item is not None:
-                    dbl_item.set("Value", f"{num_val:g}")
+                for dbl_item in plist.findall(".//doubles/Item"):
+                    if "Value" in dbl_item.attrib:
+                        dbl_item.set("Value", f"{num_val:g}")
+                prm_items = plist.findall("./parameters/Item")
+                if len(prm_items) >= 2:
+                    prm_items[1].set("Value", f"&ASC{spice_val}")
         else:
             local_ref_name = refdes
             inst_ref_attr = ""
@@ -350,6 +375,11 @@ class ComponentDomBuilder:
                 mod_local = f"2N2222A__BJT_NPN__{model_idx}"
                 mod_spice_line = f".MODEL {mod_local} NPN(Is=14.34e-15 Bf=255.9 Vaf=74.03 Ikf=0.2847 Ne=1.307 Br=6.092 Rc=1 Rb=10 Cjc=7.306e-12 Cje=22.01e-12 Tf=411.1e-12 Tr=46.91e-9)"
                 eff_spice_tpl = "q%p %tC %tB %tE %m"
+            elif "OPAMP" in fam_up or "741" in comp_up or ref_up.startswith("U"):
+                mod_local = f"LM741__OPAMP__{model_idx}"
+                raw_sp = " ".join(part.spice_data.splitlines()).strip()
+                mod_spice_line = raw_sp if raw_sp else f".SUBCKT {mod_local} 1 2 3 4 5\r\nE1 3 0 1 2 200000\r\nR1 1 2 2Meg\r\nROUT 3 5 75\r\n.ENDS"
+                eff_spice_tpl = part.spice_template.strip() or "x%p %t3 %t2 %t7 %t4 %t6 %m"
             else:
                 mod_local = f"{part.comp_name}__{part.family_name}__{model_idx}"
                 raw_sp = " ".join(part.spice_data.splitlines()).strip()
@@ -425,10 +455,11 @@ class ComponentDomBuilder:
         for _ in range(4):
             ET.SubElement(attrs, "Item")
 
+        eff_pin_fam = "NON" if part.pin_family in ("", "$ANALOG$") else part.pin_family
         it_cs1 = ET.SubElement(attrs, "Item")
         cs1 = ET.SubElement(it_cs1, "CiaCollString", {"Class": "CiaCollString"})
         strs1 = ET.SubElement(cs1, "strings")
-        for val in (f"&ASC{part.family_name}", f"&ASC{part.comp_name}", f"&ASC{part.pin_family}", "", "&ASC1", ""):
+        for val in (f"&ASC{part.family_name}", f"&ASC{part.comp_name}", f"&ASC{eff_pin_fam}", "", "&ASC1", ""):
             ET.SubElement(strs1, "Item", {"Value": val})
 
         it_cs2 = ET.SubElement(attrs, "Item")
@@ -442,8 +473,14 @@ class ComponentDomBuilder:
         ET.SubElement(it_nt, "CiaNodeType", {"Class": "CiaNodeType", "DWORD": "256"})
         for _ in range(26):
             ET.SubElement(attrs, "Item")
+        is_gnd_port = ("GROUND" in part.comp_name.upper()) or ("POWER_SOURCES" in part.family_name.upper())
+        if is_gnd_port:
+            s2_items = strs2.findall("Item")
+            if len(s2_items) >= 12:
+                s2_items[10].set("Value", "")
+                s2_items[11].set("Value", "")
         it_d1 = ET.SubElement(attrs, "Item")
-        ET.SubElement(it_d1, "CiaDOUBLE", {"Class": "CiaDOUBLE", "Double": "6"})
+        ET.SubElement(it_d1, "CiaDOUBLE", {"Class": "CiaDOUBLE", "Double": "14" if is_gnd_port else "6"})
         for _ in range(3):
             ET.SubElement(attrs, "Item")
         it_d2 = ET.SubElement(attrs, "Item")
@@ -451,6 +488,22 @@ class ComponentDomBuilder:
         ET.SubElement(attrs, "Item")
         it_d3 = ET.SubElement(attrs, "Item")
         ET.SubElement(it_d3, "CiaDOUBLE", {"Class": "CiaDOUBLE", "Double": "0"})
+        ET.SubElement(port, "Nodes")
+        return item
+
+    @staticmethod
+    def build_vconn_ciport_dom(port_ci_id: int, comp_ci_id: int) -> ET.Element:
+        item = ET.Element("Item", {"CiID": str(port_ci_id), "Class": "CiPort"})
+        port = ET.SubElement(item, "CiPort", {
+            "Class": "CiPort",
+            "LocalName": "",
+            "Component": str(comp_ci_id)
+        })
+        attrs = ET.SubElement(port, "Attributes")
+        for _ in range(40):
+            ET.SubElement(attrs, "Item")
+        it_d = ET.SubElement(attrs, "Item")
+        ET.SubElement(it_d, "CiaDOUBLE", {"Class": "CiaDOUBLE", "Double": "0"})
         ET.SubElement(port, "Nodes")
         return item
 
@@ -466,15 +519,16 @@ class ComponentDomBuilder:
         vc_guid: str,
         circuit_id: int,
         alloc_id_fn: Callable[[], int]
-    ) -> Tuple[ET.Element, ET.Element, ET.Element, int, int, int]:
+    ) -> Tuple[ET.Element, ET.Element, ET.Element, int, int, int, str]:
         sym_item = copy.deepcopy(self._skeletons["VCONN_SYM"])
         comp_el = copy.deepcopy(self._skeletons["VCONN_COMP"])
+        mod_guid = "{" + str(uuid.uuid4()).upper() + "}"
 
-        loc_px, loc_py = 36, 45
+        loc_px, loc_py = 5, 0
         pc_el = sym_item.find(".//CIITPinConnectorComp")
         if pc_el is not None:
-            loc_px = int(float(pc_el.attrib.get("ptCenterX", "36")))
-            loc_py = int(float(pc_el.attrib.get("ptCenterY", "45")))
+            loc_px = int(float(pc_el.attrib.get("ptCenterX", "5")))
+            loc_py = int(float(pc_el.attrib.get("ptCenterY", "0")))
 
         id_map: Dict[str, int] = {}
         first_seen = True
@@ -503,17 +557,20 @@ class ComponentDomBuilder:
         if txt_el is not None:
             txt_el.set("Output", f"&ASC{net_name}")
             if is_input:
-                txt_el.set("Transformer-M20", str(loc_px - 28))
-                txt_el.set("Transformer-M21", str(loc_py - 6))
+                txt_el.set("Transformer-M20", "-18")
+                txt_el.set("Transformer-M21", "-6")
                 txt_el.set("HorizontalAlign", "2")
             else:
-                txt_el.set("Transformer-M20", str(loc_px + 28))
-                txt_el.set("Transformer-M21", str(loc_py - 6))
+                txt_el.set("Transformer-M20", "18")
+                txt_el.set("Transformer-M21", "-6")
                 txt_el.set("HorizontalAlign", "0")
 
         for el in sym_item.iter():
-            if el.tag == "Item" and el.attrib.get("Value") == "&ASC__MSIM_NET_NAME__":
-                el.set("Value", f"&ASC{net_name}")
+            if el.tag == "Item":
+                if el.attrib.get("Value") in ("&ASC__MSIM_NET_NAME__", "&ASCVIN", "&ASCVOUT", "&ASCVin", "&ASCVout"):
+                    el.set("Value", f"&ASC{net_name}")
+                if "Guid" in el.attrib:
+                    el.set("Guid", mod_guid)
             elif el.tag == "ConnectList":
                 el.clear()
 
@@ -540,8 +597,6 @@ class ComponentDomBuilder:
         comp_item = ET.Element("Item", {"CiID": str(vc_ci_id), "Class": "CiComponent"})
         comp_item.append(comp_el)
 
-        dummy_part = type("DummyPart", (), {"family_name": "VIRTUAL_CONN", "comp_name": "ON_PAGE_CONNECTOR", "pin_family": "NON"})()
-        dummy_pin = type("DummyPin", (), {"name": "Dummy_VR_Pin", "number": "1", "pin_group": "GRP:A", "pin_type": "A"})()
-        port_item = self.build_ciport_dom(dummy_part, dummy_pin, vc_port_id, vc_ci_id)
+        port_item = self.build_vconn_ciport_dom(vc_port_id, vc_ci_id)
 
-        return sym_item, comp_item, port_item, pin_conn_id, loc_px, loc_py
+        return sym_item, comp_item, port_item, pin_conn_id, loc_px, loc_py, mod_guid
