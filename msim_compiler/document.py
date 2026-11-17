@@ -47,7 +47,11 @@ class MS14Document:
         return self
 
     def save(self, ms14_out_path: str, save_xml_path: Optional[str] = None) -> "MS14Document":
-        MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
+        from .schematic_builder import MultisimSchematicBuilder
+        dummy_validator = MultisimSchematicBuilder.__new__(MultisimSchematicBuilder)
+        dummy_validator.xml_text = self.xml_text
+        dummy_validator.logger = self.logger
+        dummy_validator.validate_dom_integrity()
         if save_xml_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_xml_path)), exist_ok=True)
             with open(save_xml_path, "wb") as f:
@@ -135,25 +139,21 @@ class MS14Document:
             if comp is not None and comp.attrib.get("LocalName") == f"&ASC{refdes}":
                 target_ci_id = item.attrib.get("CiID", "")
                 for plist in comp.findall(".//CiaParamList") + comp.findall(".//CiaProperDlg"):
-                    dbl = plist.find(".//doubles/Item")
-                    if dbl is not None:
-                        dbl.set("Value", f"{num_v:g}")
+                    for dbl in plist.findall(".//doubles/Item"):
+                        if "Value" in dbl.attrib:
+                            dbl.set("Value", f"{num_v:g}")
                     s_items = [it for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
                     if len(s_items) >= 2:
                         s_items[1].set("Value", f"&ASC{spice_val}")
                 exprt = comp.find(".//CiaSpiceTmpltExprt")
                 if exprt is not None and re.match(r'^[RCL]\d+$', refdes, re.IGNORECASE):
-                    raw_s = exprt.attrib.get("String", "")
-                    body_s = raw_s[4:] if raw_s.startswith("&ASC") else raw_s
                     lead_c = refdes[0].lower()
-                    body_s = re.sub(
-                        rf'^({lead_c}%p\s+%t\S+\s+%t\S+\s+)(?:#1|[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)',
-                        rf'\g<1>{num_v:.6e}',
-                        body_s,
-                        count=1,
-                        flags=re.IGNORECASE | re.MULTILINE
-                    )
-                    exprt.set("String", "&ASC" + body_s)
+                    new_tpl_str = f"&ASC{lead_c}%p %t1 %t2 {num_v:.6e}"
+                    exprt.set("String", new_tpl_str)
+                    for it_s in comp.findall(".//Item"):
+                        v_s = it_s.attrib.get("Value", "")
+                        if v_s.lower().startswith(f"&asc{lead_c}%p"):
+                            it_s.set("Value", new_tpl_str)
                 break
 
         if not target_ci_id:
@@ -192,7 +192,7 @@ class MS14Document:
 
     def set_cdata_key(self, key_name: str, new_val: str) -> int:
         pat = re.compile(
-            r'(<Element\s+Key="&amp;ASC' + re.escape(key_name) + r'">\s*<CDataElement\s+Class="CDataElement"\s+Type="\d+"\s+Data=")([^"]*)("\s*/>)',
+            r'(<Element\s+Key="&amp;ASC' + re.escape(key_name) + r'">\s*<CDataElement\b[^>]*\bData=")([^"]*)("[^>]*/>)',
             re.DOTALL
         )
         self.xml_text, cnt = pat.subn(r'\g<1>' + str(new_val) + r'\g<3>', self.xml_text)
@@ -254,14 +254,14 @@ class MS14Document:
         self.set_cdata_key("NI_EWB_TKSCOPE_TRIGGERFREQUENCY", f"{trigger_freq_hz:.2f}")
 
         node_pat = re.compile(
-            r'(<CSourceSymbolCollectNode\s+Class="CSourceSymbolCollectNode"\s+CompLongName="&amp;ASCXSC[234][^"]*">.*?</CSourceSymbolCollectNode>)',
+            r'(<CSourceSymbolCollectNode\b[^>]*CompLongName="&amp;ASCXSC[234][^"]*">.*?</CSourceSymbolCollectNode>)',
             re.DOTALL
         )
         node_matches = list(node_pat.finditer(self.xml_text))
 
         def set_local_key(blk: str, key_name: str, val_str: str) -> str:
             kpat = re.compile(
-                r'(<Element\s+Key="&amp;ASC' + re.escape(key_name) + r'">\s*<CDataElement\s+Class="CDataElement"\s+Type="\d+"\s+Data=")([^"]*)("\s*/>)',
+                r'(<Element\s+Key="&amp;ASC' + re.escape(key_name) + r'">\s*<CDataElement\b[^>]*\bData=")([^"]*)("[^>]*/>)',
                 re.DOTALL
             )
             return kpat.sub(r'\g<1>' + str(val_str) + r'\g<3>', blk)
@@ -287,7 +287,7 @@ class MS14Document:
                 nblk = set_local_key(nblk, "NI_EWB_SELCHANNELID", "0")
 
             pat_db = re.compile(
-                r'(<Element\s+Key="&amp;ASCNI_EWB_SCOPETK_DATABASEDATA">\s*<CDataElement\s+Class="CDataElement"\s+Type="5"\s+Data=")([^"]*)("\s*/>)',
+                r'(<Element\s+Key="&amp;ASCNI_EWB_SCOPETK_DATABASEDATA">\s*<CDataElement\b[^>]*\bData=")([^"]*)("[^>]*/>)',
                 re.DOTALL
             )
             m = pat_db.search(nblk)
@@ -340,11 +340,11 @@ class MS14Document:
     def configure_dashboard_layout(self, rects: List[WindowRect]) -> "MS14Document":
         self.set_cdata_key("NI_EWB_SHOW_WINDOW_STATUS", "1")
         dlg_pat = re.compile(
-            r'(<Element\s+Key="&amp;ASCNI_EWB_DIALOG_STATUS">\s*<CDataElement\s+Class="CDataElement"\s+Type="4"\s+Data="0">\s*<Elements>\s*)'
-            r'<CDataElement\s+Class="CDataElement"\s+Type="1"\s+Data="([^"]*)"\s*/>\s*'
-            r'<CDataElement\s+Class="CDataElement"\s+Type="1"\s+Data="([^"]*)"\s*/>\s*'
-            r'<CDataElement\s+Class="CDataElement"\s+Type="1"\s+Data="([^"]*)"\s*/>\s*'
-            r'<CDataElement\s+Class="CDataElement"\s+Type="1"\s+Data="([^"]*)"\s*/>'
+            r'(<Element\s+Key="&amp;ASCNI_EWB_DIALOG_STATUS">\s*<CDataElement\b[^>]*>\s*<Elements>\s*)'
+            r'<CDataElement\b[^>]*\bData="([^"]*)"[^>]*/>\s*'
+            r'<CDataElement\b[^>]*\bData="([^"]*)"[^>]*/>\s*'
+            r'<CDataElement\b[^>]*\bData="([^"]*)"[^>]*/>\s*'
+            r'<CDataElement\b[^>]*\bData="([^"]*)"[^>]*/>'
             r'(\s*</Elements>\s*</CDataElement>\s*</Element>)',
             re.DOTALL
         )
