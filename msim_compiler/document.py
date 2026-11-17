@@ -110,13 +110,13 @@ class MS14Document:
 
     @staticmethod
     def format_si(value: float, unit_suffix: str = "") -> str:
-        if value >= 1e6: return f"{value/1e6:.3g}M{unit_suffix}"
-        if value >= 1e3: return f"{value/1e3:.3g}k{unit_suffix}"
-        if value >= 1.0: return f"{value:.3g}{unit_suffix}"
-        if value >= 1e-3: return f"{value*1e3:.3g}m{unit_suffix}"
-        if value >= 1e-6: return f"{value*1e6:.3g}u{unit_suffix}"
-        if value >= 1e-9: return f"{value*1e9:.3g}n{unit_suffix}"
-        return f"{value*1e12:.3g}p{unit_suffix}"
+        if value >= 1e6: return f"{value/1e6:.5g}M{unit_suffix}"
+        if value >= 1e3: return f"{value/1e3:.5g}k{unit_suffix}"
+        if value >= 1.0: return f"{value:.5g}{unit_suffix}"
+        if value >= 1e-3: return f"{value*1e3:.5g}m{unit_suffix}"
+        if value >= 1e-6: return f"{value*1e6:.5g}u{unit_suffix}"
+        if value >= 1e-9: return f"{value*1e9:.5g}n{unit_suffix}"
+        return f"{value*1e12:.5g}p{unit_suffix}"
 
     @staticmethod
     def format_display_label(refdes: str, spice_val: str) -> str:
@@ -128,6 +128,12 @@ class MS14Document:
         return f"&amp;ASC{spice_val}"
 
     def set_component(self, refdes: str, spice_val: str, display_label: Optional[str] = None) -> "MS14Document":
+        clean_sp = str(spice_val).strip()
+        if re.match(r"^[RCL]\d+$", refdes, re.IGNORECASE):
+            for suf in ("Ohm", "ohm", "F", "H", "V", "A", "Hz"):
+                if clean_sp.endswith(suf) and len(clean_sp) > len(suf):
+                    clean_sp = clean_sp[:-len(suf)].strip()
+        spice_val = clean_sp
         disp = display_label or self.format_display_label(refdes, spice_val)
         disp_unesc = ComponentDomBuilder.unesc(disp)
         num_v = MultisimDOMManipulator.parse_si_value(str(spice_val))
@@ -139,9 +145,9 @@ class MS14Document:
             if comp is not None and comp.attrib.get("LocalName") == f"&ASC{refdes}":
                 target_ci_id = item.attrib.get("CiID", "")
                 for plist in comp.findall(".//CiaParamList") + comp.findall(".//CiaProperDlg"):
-                    for dbl in plist.findall(".//doubles/Item"):
-                        if "Value" in dbl.attrib:
-                            dbl.set("Value", f"{num_v:g}")
+                    dbl_items = plist.findall(".//doubles/Item")
+                    if dbl_items and "Value" in dbl_items[0].attrib:
+                        dbl_items[0].set("Value", f"{num_v:g}")
                     s_items = [it for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
                     if len(s_items) >= 2:
                         s_items[1].set("Value", f"&ASC{spice_val}")
