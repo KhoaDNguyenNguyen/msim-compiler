@@ -310,6 +310,8 @@ class MultisimDatabaseBridge:
                     p_grp = pin_groups[idx] if idx < len(pin_groups) else "GRP:A"
                     p_typ = pin_types[idx].split(":")[0] if idx < len(pin_types) and ":" in pin_types[idx] else "A"
 
+                    if part.comp_name == "741" and p_name in ("BAL1", "BAL2"):
+                        continue
                     part.pins.append(DbPinSpec(
                         index=idx + 1,
                         name=p_name,
@@ -448,10 +450,26 @@ class MultisimSchematicBuilder:
         num = float(m.group(1))
         suf = m.group(2)
         scale_map = {
-            "T": 1e12, "G": 1e9, "M": 1e6, "MEG": 1e6, "k": 1e3, "K": 1e3,
+            "T": 1e12, "G": 1e9, "M": 1e6, "MEG": 1e6, "meg": 1e6, "Meg": 1e6, "k": 1e3, "K": 1e3,
             "": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15
         }
         return num * scale_map.get(suf, 1.0)
+
+    def place_dc_power_rails(self, vdd_volts: float = 15.0, vss_volts: float = -15.0, x: int = 270, y: int = 396) -> Tuple[str, str]:
+        r_vdd = f"R_VDD_{len(self.placed_components) + 1}"
+        r_vss = f"R_VSS_{len(self.placed_components) + 2}"
+        self.place_part_from_db("RESISTOR_VIRTUAL", r_vdd, x=x, y=y, value_or_label="1m", rotation=90)
+        self.place_part_from_db("RESISTOR_VIRTUAL", r_vss, x=x + 72, y=y, value_or_label="1m", rotation=90)
+        gnd_rail = self.place_ground_symbol(x + 90, y + 117)
+        gnd_pin = next(iter(gnd_rail.pins.keys()), "1")
+        self.connect_net("0", [(r_vdd, "2"), (r_vss, "2"), (gnd_rail.refdes, gnd_pin)])
+        self.xml_text = MultisimDOMManipulator.update_spice_template_for_component(
+            self.xml_text, r_vdd, f"v_%p %t1 %t2 dc {vdd_volts:g} ac 0\r\nr%p %t1 %t2 1e9"
+        )
+        self.xml_text = MultisimDOMManipulator.update_spice_template_for_component(
+            self.xml_text, r_vss, f"v_%p %t1 %t2 dc {vss_volts:g} ac 0\r\nr%p %t1 %t2 1e9"
+        )
+        return r_vdd, r_vss
 
     def place_ground_symbol(self, pin_world_x: int, pin_world_y: int, refdes: Optional[str] = None) -> PlacedComponentInstance:
         pin_world_x = AffineGrid2D.snap9(pin_world_x)
@@ -1255,10 +1273,11 @@ class MultisimSchematicBuilder:
 
         comp_up_chk = part.comp_name.upper()
         fam_up_chk = part.family_name.upper()
+        is_power_src = comp_up_chk in ("VCC", "VEE") or refdes.upper().startswith(("VCC", "VEE"))
         is_ground = ("GROUND" in comp_up_chk) or (refdes.upper() == "0") or refdes.upper().startswith("GND")
         is_passive_virtual = any(k in fam_up_chk or k in comp_up_chk for k in ("RESISTOR", "CAPACITOR", "INDUCTOR"))
 
-        model_ci_id = None if (is_ground or is_passive_virtual) else self._alloc_id()
+        model_ci_id = None if (is_ground or is_power_src or is_passive_virtual) else self._alloc_id()
 
         clean_raw_val = (value_or_label or part.comp_name).strip()
         if is_passive_virtual:
@@ -1391,7 +1410,11 @@ class MultisimSchematicBuilder:
                 wire_attached=False
             )
             inst.pins[p_spec.name] = p_inst
-            if str(p_spec.index) not in inst.pins:
+            if "OPAMP" in fam_up_chk or "741" in comp_up_chk:
+                dip8_alias = {"IN+": "3", "IN-": "2", "VS+": "7", "VS-": "4", "OUT": "6", "BAL1": "1", "BAL2": "5"}
+                if p_spec.name in dip8_alias:
+                    inst.pins[dip8_alias[p_spec.name]] = p_inst
+            elif str(p_spec.index) not in inst.pins:
                 inst.pins[str(p_spec.index)] = p_inst
             pin_obstacle_corridors.append((wx, wy, lead_x, lead_y))
 
@@ -1472,7 +1495,7 @@ class MultisimSchematicBuilder:
         self.xml_text = re.sub(r'(<Item\s+CiID="' + str(self.circuit_id) + r'"\s+Class="CiCircuit">.*?<Ports>)', lambda m: m.group(1) + "\n" + "\n".join(circuit_port_refs), self.xml_text, count=1, flags=re.DOTALL)
         self.xml_text = re.sub(r'(<Item\s+CiID="' + str(self.circuit_id) + r'"\s+Class="CiCircuit">.*?<Components>)', lambda m: m.group(1) + f'\n<Item CiID="{ci_id}"/>', self.xml_text, count=1, flags=re.DOTALL)
 
-        if not is_ground:
+        if not is_ground and not is_power_src:
             self._register_component_in_refdes_mgr(inst)
         self.placed_components[refdes] = inst
         self.logger.info(f"Placed [{refdes}] ({part.comp_name}) via ComponentDomBuilder at (X={x}, Y={y}, Rot={rotation}deg) -> CiID={ci_id}, SymID={sym_id}")
@@ -1908,7 +1931,7 @@ class MultisimSchematicBuilder:
                 assert forbidden_tok not in body_tpl, (
                     f"Parasitic SPICE Contamination on '{refdes}': forbidden token '{forbidden_tok}' found in '{body_tpl}'"
                 )
-            if lead_char in ("R", "C", "L"):
+            if lead_char in ("R", "C", "L") and not refdes.upper().startswith(("R_VDD", "R_VSS")):
                 type_map = {
                     "R": ("RESISTOR", "RESISTOR_VIRTUAL", "VIRTUAL_RESISTANCE", "Resistor", "R%d"),
                     "C": ("CAPACITOR", "CAPACITOR_VIRTUAL", "VIRTUAL_CAPACITANCE", "Capacitor", "C%d"),
@@ -1937,7 +1960,7 @@ class MultisimSchematicBuilder:
                     assert abs(v_ref - v_cand) <= max(1e-18, abs(v_ref) * 1e-3), (
                         f"GUI Dialog Desynchronization on '{refdes}': {param_vals}"
                     )
-                m_sp_num = re.search(r'^[rcl]%p\s+%t\S+\s+%t\S+\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', body_tpl.strip(), re.IGNORECASE)
+                m_sp_num = re.search(r'^[rcl]%p\s+%t\S+\s+%t\S+\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', body_tpl.strip(), re.IGNORECASE | re.MULTILINE)
                 assert m_sp_num is not None, f"Missing explicit numeric value in CiaSpiceTmpltExprt on '{refdes}': '{body_tpl}'"
                 v_sp = float(m_sp_num.group(1))
                 assert abs(v_ref - v_sp) <= max(1e-18, abs(v_ref) * 1e-3), (
