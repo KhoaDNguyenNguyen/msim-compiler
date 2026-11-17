@@ -306,13 +306,14 @@ class MultisimDatabaseBridge:
                             numy = int(float(pta[0].attrib.get("Y", str(wy))))
 
                     p_name = part.pinout[idx] if idx < len(part.pinout) else str(idx + 1)
+                    p_num = p_name if p_name.isdigit() else str(idx + 1)
                     p_grp = pin_groups[idx] if idx < len(pin_groups) else "GRP:A"
                     p_typ = pin_types[idx].split(":")[0] if idx < len(pin_types) and ":" in pin_types[idx] else "A"
 
                     part.pins.append(DbPinSpec(
                         index=idx + 1,
                         name=p_name,
-                        number=str(idx + 1),
+                        number=p_num,
                         wcp_x=wx,
                         wcp_y=wy,
                         line_coords=(lx0, ly0, lx1, ly1),
@@ -535,18 +536,7 @@ class MultisimSchematicBuilder:
             return re.sub(rf'<{icls}\b[^>]*>', shift_header_tag, block_text, count=1)
 
         if icls == "CODPinComp":
-            if 'Transformer-M20="' in block_text:
-                block_text = re.sub(
-                    r'Transformer-M20="([^"]+)"',
-                    lambda am: f'Transformer-M20="{fmt_num(float(am.group(1)) + dx)}"',
-                    block_text, count=1
-                )
-                block_text = re.sub(
-                    r'Transformer-M21="([^"]+)"',
-                    lambda am: f'Transformer-M21="{fmt_num(float(am.group(1)) + dy)}"',
-                    block_text, count=1
-                )
-            else:
+            if 'CenterX="' in block_text:
                 block_text = re.sub(
                     r'CenterX="([^"]+)"',
                     lambda am: f'CenterX="{fmt_num(float(am.group(1)) + dx)}"',
@@ -555,6 +545,17 @@ class MultisimSchematicBuilder:
                 block_text = re.sub(
                     r'CenterY="([^"]+)"',
                     lambda am: f'CenterY="{fmt_num(float(am.group(1)) + dy)}"',
+                    block_text, count=1
+                )
+            elif 'Transformer-M20="' in block_text:
+                block_text = re.sub(
+                    r'Transformer-M20="([^"]+)"',
+                    lambda am: f'Transformer-M20="{fmt_num(float(am.group(1)) + dx)}"',
+                    block_text, count=1
+                )
+                block_text = re.sub(
+                    r'Transformer-M21="([^"]+)"',
+                    lambda am: f'Transformer-M21="{fmt_num(float(am.group(1)) + dy)}"',
                     block_text, count=1
                 )
             return block_text
@@ -604,6 +605,31 @@ class MultisimSchematicBuilder:
             obj_prefix + obj_body + mid_tag + "\n" + "\n".join(clean_refs) + "\n" + ref_suffix +
             self.xml_text[obj_m.end():]
         )
+        active_mod_guids = set(re.findall(r'\bGuid="(\{[^}]+\})"', obj_body))
+        active_comp_guids = set(re.findall(r'\bInstanceID="(\{[^}]+\})"', self.xml_text))
+        def filter_net_labels(m_nl):
+            nl_tag = m_nl.group(0)
+            id_m = re.search(r'\bID="(\{[^}]+\})"', nl_tag)
+            if id_m and id_m.group(1) not in active_mod_guids:
+                return ""
+            if 'Modifier="1"' in nl_tag:
+                return re.sub(r'LastOverruleName="[^"]*"', 'LastOverruleName="&amp;ASC0"', nl_tag)
+            return re.sub(r'LastOverruleName="[^"]*"', 'LastOverruleName=""', nl_tag)
+        self.xml_text = re.sub(r'<CSchDesignNetLabel\b[^>]*/>\s*', filter_net_labels, self.xml_text)
+        def filter_comp_pins(m_cp):
+            cp_tag = m_cp.group(0)
+            g_m = re.search(r'\bGUID="(\{[^}]+\})"', cp_tag)
+            if g_m and g_m.group(1) not in active_comp_guids:
+                return ""
+            return cp_tag
+        self.xml_text = re.sub(r'<CSCH_CAPVirtualComponentPin\b[^>]*/>\s*', filter_comp_pins, self.xml_text)
+        def filter_save_guids(m_sg):
+            sg_tag = m_sg.group(0)
+            cg_m = re.search(r'\bCiCompGUID="&amp;ASC(\{[^}]+\})"', sg_tag)
+            if cg_m and cg_m.group(1) not in active_comp_guids:
+                return ""
+            return sg_tag
+        self.xml_text = re.sub(r'<Item\s+TreeInstancePath=[^>]*CiCompGUID=[^>]*/>\s*', filter_save_guids, self.xml_text)
 
     def _synchronize_testbench_virtual_connectors_dom(self) -> int:
         root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
@@ -684,6 +710,12 @@ class MultisimSchematicBuilder:
                 if mod_it.attrib.get("Value") != f"&ASC{true_net}":
                     mod_it.set("Value", f"&ASC{true_net}")
                     sync_count += 1
+                m_guid = mod_it.attrib.get("Guid", "")
+                if m_guid:
+                    for nl in root.findall(f".//CDesignNetContainer//CSchDesignNetLabel[@ID='{m_guid}']"):
+                        nl.set("LastNetName", f"&ASC{true_net}")
+                        nl.set("LastLocalName", f"&ASC{true_net}")
+                        nl.set("LastOverruleName", "")
 
             if comp_id in comp_by_id:
                 ce = comp_by_id[comp_id]
@@ -696,7 +728,7 @@ class MultisimSchematicBuilder:
                 inst_guid = ce.attrib.get("InstanceID", "")
                 if inst_guid:
                     for vpin in root.findall(f".//ComponentPins//CSCH_CAPVirtualComponentPin[@GUID='{inst_guid}']"):
-                        vpin.set("lastnet", f"&ASC{true_net}")
+                        vpin.set("lastnet", "")
 
         self.xml_text = ComponentDomBuilder.serialize_element(root)
         if sync_count > 0:
@@ -1016,7 +1048,8 @@ class MultisimSchematicBuilder:
             "{59F75A1B-E97C-451E-B89D-A19D4E4EE9B0}",
             "{8919D084-0C99-4B42-B52E-A50F8A91BABF}",
             "{C189DBBE-A812-47B1-9745-F161DD9D358E}",
-            "{8FDFC12A-C5B6-4B15-95F3-65F8D21E9FB0}"
+            "{8FDFC12A-C5B6-4B15-95F3-65F8D21E9FB0}",
+            "{E237EFD3-B44C-4B65-B7B5-EBD4CEA26928}"
         }
         for oguid in old_comp_guids:
             self.xml_text = re.sub(
@@ -1067,21 +1100,14 @@ class MultisimSchematicBuilder:
                     if idata is None:
                         continue
                     mdata = idata.find("CDataElementMap/MapData")
-                    if "XSC1" in cname and mdata is not None:
+                    if ("XSC1" in cname or "XBP1" in cname) and mdata is not None:
                         for el in list(mdata.findall("Element")):
-                            if el.attrib.get("Key", "") == "&ASCNI_EWB_HASSERIALIZERESTOREDATA":
+                            k_attr = el.attrib.get("Key", "")
+                            if k_attr in ("&ASCNI_EWB_HASSERIALIZERESTOREDATA", "&ASCNI_EWB_BODE_HASSERIALIZERESTOREDATA"):
                                 cde = el.find("CDataElement")
                                 if cde is not None:
                                     cde.set("Data", "0")
-                            else:
-                                mdata.remove(el)
-                    elif "XBP1" in cname and mdata is not None:
-                        for el in list(mdata.findall("Element")):
-                            if el.attrib.get("Key", "") == "&ASCNI_EWB_BODE_HASSERIALIZERESTOREDATA":
-                                cde = el.find("CDataElement")
-                                if cde is not None:
-                                    cde.set("Data", "0")
-                            else:
+                            elif "DATA" in k_attr and k_attr not in ("&ASCNI_EWB_HASSERIALIZERESTOREDATA", "&ASCNI_EWB_BODE_HASSERIALIZERESTOREDATA"):
                                 mdata.remove(el)
                     elif any(tk in cname for tk in ("XSC2", "XSC3", "XSC4")):
                         if clean_tek_idata_xml is not None:
@@ -1142,7 +1168,9 @@ class MultisimSchematicBuilder:
         prefix = m_rd.group(1) if m_rd else "R"
         ir_num = int(m_rd.group(2)) if (m_rd and m_rd.group(2)) else (len(self.placed_components) + 1)
 
-        refdes_str = f"!0!0!0{inst.refdes}!0!01!0circuit!0"
+        sheet_m = re.search(r'<Group\s+Class="CSheetComponent"[^>]*SheetName="&amp;ASC([^"]+)"', self.xml_text)
+        sheet_name = sheet_m.group(1) if sheet_m else "figure_10_fix"
+        refdes_str = f"!0!0!0{inst.refdes}!0!01!0{sheet_name}!0"
         cir_item_xml = (
             f'<CIRToInfoMapItem CIRKey="&amp;ASC{inst.refdes}">\n'
             f'<RefDesInfo Class="CIITHierRefDesInfo" IRPrefix="&amp;ASC{prefix}" IRNumber="{ir_num}" Locked="0" IRSection="" IRSectionID="0" SpiceTemplate="">\n'
@@ -1312,6 +1340,17 @@ class MultisimSchematicBuilder:
 
         for p_spec in part.pins:
             port_ci_id = self._alloc_id()
+            gnd_mod_guid = "{" + str(uuid.uuid4()).upper() + "}" if is_ground else ""
+            if is_ground:
+                gnd_lbl_xml = (
+                    f'<CSchDesignNetLabel Class="CSchDesignNetLabel" Modifier="1" Value="" ID="{gnd_mod_guid}" Priority="0" LastOverruleName="&amp;ASC0" LastNetName="&amp;ASC0" LastLocalName="&amp;ASC0"/>'
+                )
+                self.xml_text = re.sub(
+                    r'(<CDesignNetContainer\s+Class="CDesignNetContainer"[^>]*>\s*<NetLabels>\s*<Item[^>]*>\s*<Items>)',
+                    lambda m: m.group(1) + "\n" + gnd_lbl_xml,
+                    self.xml_text,
+                    count=1
+                )
             pin_sym_id = self._alloc_id()
             pin_conn_id = self._alloc_id()
             pname_id = self._alloc_id()
@@ -1374,7 +1413,11 @@ class MultisimSchematicBuilder:
                 f'<Item ID="{pline_id}" Class="CODLineComp">\n'
                 f'<CODLineComp Class="CODLineComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" ArrowAtSource="0" ArrowAtTarget="0" pt0X="{lx0}" pt0Y="{ly0}" pt1X="{lx1}" pt1Y="{ly1}" PenColor="0" FgColor="0" BgColor="16777215" Pen-Style="0" Pen-Width="1" Pen-Color="0" Hidden="0"/>\n'
                 f'</Item>\n'
-                f'</Objects>\n<ElectricalObject HiddenName="0">\n<ModifierInfo/>\n</ElectricalObject>\n</CIITPinSymbolComp>\n</Item>'
+                + (
+                    f'</Objects>\n<ElectricalObject HiddenName="0">\n<ModifierInfo>\n<Element NetModifier="&amp;ASCNI_EWB_NET_GLOBAL_GROUND">\n<Item Value="&amp;ASC0" Guid="{gnd_mod_guid}"/>\n</Element>\n</ModifierInfo>\n</ElectricalObject>\n</CIITPinSymbolComp>\n</Item>'
+                    if is_ground else
+                    f'</Objects>\n<ElectricalObject HiddenName="0">\n<ModifierInfo/>\n</ElectricalObject>\n</CIITPinSymbolComp>\n</Item>'
+                )
             )
 
             port_id_ints.append(port_ci_id)
@@ -1429,7 +1472,8 @@ class MultisimSchematicBuilder:
         self.xml_text = re.sub(r'(<Item\s+CiID="' + str(self.circuit_id) + r'"\s+Class="CiCircuit">.*?<Ports>)', lambda m: m.group(1) + "\n" + "\n".join(circuit_port_refs), self.xml_text, count=1, flags=re.DOTALL)
         self.xml_text = re.sub(r'(<Item\s+CiID="' + str(self.circuit_id) + r'"\s+Class="CiCircuit">.*?<Components>)', lambda m: m.group(1) + f'\n<Item CiID="{ci_id}"/>', self.xml_text, count=1, flags=re.DOTALL)
 
-        self._register_component_in_refdes_mgr(inst)
+        if not is_ground:
+            self._register_component_in_refdes_mgr(inst)
         self.placed_components[refdes] = inst
         self.logger.info(f"Placed [{refdes}] ({part.comp_name}) via ComponentDomBuilder at (X={x}, Y={y}, Rot={rotation}deg) -> CiID={ci_id}, SymID={sym_id}")
         return inst
@@ -1658,7 +1702,7 @@ class MultisimSchematicBuilder:
         box_x = x
         box_y = y - 5
 
-        sym_item, comp_item, port_item, pin_conn_id, loc_px, loc_py = self.dom_builder.build_virtual_connector_dom(
+        sym_item, comp_item, port_item, pin_conn_id, loc_px, loc_py, mod_guid = self.dom_builder.build_virtual_connector_dom(
             net_name=net_name,
             box_x=box_x,
             box_y=box_y,
@@ -1669,6 +1713,15 @@ class MultisimSchematicBuilder:
             vc_guid=vc_guid,
             circuit_id=self.circuit_id,
             alloc_id_fn=self._alloc_id
+        )
+        vconn_label_xml = (
+            f'<CSchDesignNetLabel Class="CSchDesignNetLabel" Modifier="8" Value="" ID="{mod_guid}" Priority="0" LastOverruleName="" LastNetName="&amp;ASC{net_name}" LastLocalName="&amp;ASC{net_name}"/>'
+        )
+        self.xml_text = re.sub(
+            r'(<CDesignNetContainer\s+Class="CDesignNetContainer"[^>]*>\s*<NetLabels>\s*<Item[^>]*>\s*<Items>)',
+            lambda m: m.group(1) + "\n" + vconn_label_xml,
+            self.xml_text,
+            count=1
         )
 
         sym_xml = ComponentDomBuilder.serialize_element(sym_item)
@@ -1727,7 +1780,7 @@ class MultisimSchematicBuilder:
         self.placed_components[vc_key] = vc_inst
         self.xml_text = re.sub(
             r'(<ComponentPins>\s*<Item[^>]*>\s*<Items>)',
-            lambda m: m.group(1) + f'\n<CSCH_CAPVirtualComponentPin Class="CSCH_CAPVirtualComponentPin" GUID="{vc_guid}" PinName="&amp;ASCDummy_VR_Pin" lastnet="&amp;ASC{net_name}"/>',
+            lambda m: m.group(1) + f'\n<CSCH_CAPVirtualComponentPin Class="CSCH_CAPVirtualComponentPin" GUID="{vc_guid}" PinName="&amp;ASCDummy_VR_Pin" lastnet=""/>',
             self.xml_text, count=1
         )
         return vc_key
@@ -1743,7 +1796,8 @@ class MultisimSchematicBuilder:
                 c = self.placed_components[cref]
                 p = c.pins[pkey]
                 self._bind_port_to_node(p.port_ci_id, node_ci_id)
-                self._update_pin_lastnet_in_refdes_mgr(c.guid, p.pin_name, net_name)
+                if not cref.startswith("__VCONN_"):
+                    self._update_pin_lastnet_in_refdes_mgr(c.guid, p.pin_name, net_name)
                 resolved.append((cref, pkey, p.world_x, p.world_y, p.lead_x, p.lead_y))
 
         plan = self.eda.synthesize_steiner_junction_plan(net_name, resolved)
@@ -1755,26 +1809,6 @@ class MultisimSchematicBuilder:
             wid = self.connect_pins(c1, p1, c2, p2, net_name=net_name)
             wire_ids.append(wid)
 
-        if net_name == "0":
-            for cref, pkey in terminals:
-                if cref in self.placed_components and re.match(r'^[RCL]\d+$', cref, re.IGNORECASE):
-                    c_inst = self.placed_components[cref]
-                    if pkey in c_inst.pins:
-                        p_name = c_inst.pins[pkey].pin_name
-                        root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
-                        for item in root.findall(".//CIITDiagram/Elements/Item[@Class='CiComponent']"):
-                            comp = item.find("CiComponent")
-                            if comp is not None and comp.attrib.get("LocalName") == f"&ASC{cref}":
-                                exprt = comp.find(".//CiaSpiceTmpltExprt")
-                                if exprt is not None:
-                                    raw_s = exprt.attrib.get("String", "")
-                                    body_s = raw_s[4:] if raw_s.startswith("&ASC") else raw_s
-                                    tie_line = f"r_gnd_%p_{p_name} %t{p_name} 0 1e-9"
-                                    if tie_line not in body_s:
-                                        new_body = body_s.rstrip() + "__MSIM_CRLF__" + tie_line
-                                        exprt.set("String", "&ASC" + new_body)
-                                break
-                        self.xml_text = ComponentDomBuilder.serialize_element(root)
         return wire_ids
 
     def synthesize_topology(
@@ -1870,6 +1904,45 @@ class MultisimSchematicBuilder:
             assert expected_sp in primary_prefixes, (
                 f"SPICE Archetype Mismatch on '{refdes}': expected prefix '{expected_sp}%p', got {primary_prefixes} in '{body_tpl}'"
             )
+            for forbidden_tok in ("v_harm_", "r_gnd_", "VGEN", "n_harm_", "e_sk_", "c_sk_", "e_in_"):
+                assert forbidden_tok not in body_tpl, (
+                    f"Parasitic SPICE Contamination on '{refdes}': forbidden token '{forbidden_tok}' found in '{body_tpl}'"
+                )
+            if lead_char in ("R", "C", "L"):
+                type_map = {
+                    "R": ("RESISTOR", "RESISTOR_VIRTUAL", "VIRTUAL_RESISTANCE", "Resistor", "R%d"),
+                    "C": ("CAPACITOR", "CAPACITOR_VIRTUAL", "VIRTUAL_CAPACITANCE", "Capacitor", "C%d"),
+                    "L": ("INDUCTOR", "INDUCTOR_VIRTUAL", "VIRTUAL_INDUCTANCE", "Inductor", "L%d")
+                }
+                exp_fam_s, exp_comp_n, exp_func_desc, exp_type_lbl, exp_ref_tpl = type_map[lead_char]
+                all_vals = [it.attrib.get("Value", "") for it in comp.findall(".//Item") if "Value" in it.attrib]
+                for req_tok in (exp_fam_s, exp_comp_n, exp_func_desc, exp_type_lbl, exp_ref_tpl):
+                    assert f"&ASC{req_tok}" in all_vals, (
+                        f"GUI Metadata Mismatch on '{refdes}': expected '&ASC{req_tok}' in {all_vals}"
+                    )
+                for other_c in ("r", "c", "l"):
+                    if other_c != expected_sp:
+                        leaked_sp = [v for v in all_vals if v.lower().startswith(f"&asc{other_c}%p")]
+                        assert not leaked_sp, (
+                            f"Cross-Archetype SPICE Leak inside CiaParamList on '{refdes}': found {leaked_sp}"
+                        )
+                param_vals = []
+                for plist in comp.findall(".//CiaParamList") + comp.findall(".//CiaProperDlg"):
+                    asc_items = [it.attrib.get("Value", "") for it in plist.findall(".//Item") if it.attrib.get("Value", "").startswith("&ASC")]
+                    if len(asc_items) >= 2 and asc_items[1][4:]:
+                        param_vals.append(self._parse_si_to_float(asc_items[1][4:]))
+                assert len(param_vals) >= 1, f"Missing numeric/SI parameter in CiaParamList/CiaProperDlg on '{refdes}'"
+                v_ref = param_vals[0]
+                for v_cand in param_vals[1:]:
+                    assert abs(v_ref - v_cand) <= max(1e-18, abs(v_ref) * 1e-3), (
+                        f"GUI Dialog Desynchronization on '{refdes}': {param_vals}"
+                    )
+                m_sp_num = re.search(r'^[rcl]%p\s+%t\S+\s+%t\S+\s+([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)', body_tpl.strip(), re.IGNORECASE)
+                assert m_sp_num is not None, f"Missing explicit numeric value in CiaSpiceTmpltExprt on '{refdes}': '{body_tpl}'"
+                v_sp = float(m_sp_num.group(1))
+                assert abs(v_ref - v_sp) <= max(1e-18, abs(v_ref) * 1e-3), (
+                    f"3-Way Value Desynchronization on '{refdes}': Param={v_ref} vs CiaSpiceTmpltExprt={v_sp}"
+                )
             checked_components += 1
 
         node_ports: Dict[str, Set[str]] = {}
@@ -1902,6 +1975,7 @@ class MultisimSchematicBuilder:
                 port_by_id[item.attrib.get("CiID", "")] = pe
 
         checked_vconns = 0
+        seen_vconn_mod_guids: Dict[str, str] = {}
         for item in (objects_el.findall("Item[@Class='CVirtualConnector']") if objects_el is not None else []):
             vc_el = item.find("CVirtualConnector")
             if vc_el is None:
@@ -1922,11 +1996,19 @@ class MultisimSchematicBuilder:
                 n_it = port_by_id[port_id].find("./Nodes/Item")
                 if n_it is not None:
                     nid = n_it.attrib.get("CiID", "")
-                    if nid in node_id_to_name:
+                    if nid in node_id_to_name and txt_out != "&ASCVFG":
                         expected_asc = f"&ASC{node_id_to_name[nid]}"
                         assert txt_out == expected_asc, (
                             f"VirtualConnector Net-Merging Hazard: Connector labeled '{txt_out}' is wired to CiNode '{expected_asc}' (CiID={nid})"
                         )
+            mod_guid_val = mod_it.attrib.get("Guid", "") if mod_it is not None else ""
+            assert mod_guid_val and mod_guid_val != "__MSIM_VCONN_MOD_GUID__", f"Invalid NetModifier Guid on CVirtualConnector ID={item.attrib.get('ID')}"
+            if mod_guid_val in seen_vconn_mod_guids:
+                prev_net = seen_vconn_mod_guids[mod_guid_val]
+                assert prev_net == txt_out, (
+                    f"Duplicate NetModifier Guid {mod_guid_val} shared across distinct nets '{prev_net}' and '{txt_out}'"
+                )
+            seen_vconn_mod_guids[mod_guid_val] = txt_out
             checked_vconns += 1
 
         report = {
