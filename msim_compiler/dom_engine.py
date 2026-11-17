@@ -67,9 +67,18 @@ class MultisimDOMManipulator:
     @classmethod
     def parse_dom_preserving_multiline_attrs(cls, xml_text: str) -> ET.Element:
         def protect_attr(m):
-            val = m.group(2).replace(CRLF, CRLF_TOKEN).replace(LF, LF_TOKEN)
+            val = (
+                m.group(2)
+                .replace("&#xD;&#xA;", CRLF_TOKEN)
+                .replace("&#xd;&#xa;", CRLF_TOKEN)
+                .replace("&#13;&#10;", CRLF_TOKEN)
+                .replace("&#xA;", LF_TOKEN)
+                .replace("&#10;", LF_TOKEN)
+                .replace(CRLF, CRLF_TOKEN)
+                .replace(LF, LF_TOKEN)
+            )
             return m.group(1) + val + m.group(3)
-        protected_xml = re.sub(r'(\bString=")([^"]*)(")', protect_attr, xml_text)
+        protected_xml = re.sub(r'(\b(?:String|Value)=")([^"]*)(")', protect_attr, xml_text)
         return ET.fromstring(protected_xml.encode("utf-8"))
 
     @classmethod

@@ -45,7 +45,7 @@ class EDAConfigRegistry:
         "INDUCTOR_VIRTUAL": "l%p %t1 %t2 \x231"
     })
     si_multipliers: Dict[str, float] = field(default_factory=lambda: {
-        "T": 1e12, "G": 1e9, "M": 1e6, "MEG": 1e6, "k": 1e3, "K": 1e3,
+        "T": 1e12, "G": 1e9, "M": 1e6, "MEG": 1e6, "meg": 1e6, "Meg": 1e6, "k": 1e3, "K": 1e3,
         "": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15
     })
 
