@@ -104,167 +104,147 @@ class MultisimDOMManipulator:
         harmonics: List[HarmonicTone],
         injection_target: Optional[str] = None
     ) -> str:
-        root = cls.parse_dom_preserving_multiline_attrs(xml_text)
-        elements_node = root.find(".//CIITDiagram/Elements")
-        if elements_node is None or len(harmonics) <= 1:
+        extra_tones = harmonics[1:] if len(harmonics) > 1 else []
+        if not extra_tones:
             return xml_text
 
-        vgen_node_id = "490443665"
-        vin_node_id = "490443664"
-        xfg_plus_port_id = "495909056"
-        xfg_vconn_port_id = "495902920"
-        xfg_vconn_sym_id = "192713976"
-        xfg_vconn_comp_id = "495902608"
-        xfg_wire_ids = {"477615600", "477617544"}
+        root = cls.parse_dom_preserving_multiline_attrs(xml_text)
+        elements_el = root.find(".//CIITDiagram/Elements")
+        objects_el = root.find(".//CODComposite/Objects")
+        if elements_el is None or objects_el is None:
+            return xml_text
 
-        existing_vgen = None
-        for item in elements_node.findall("Item[@Class='CiNode']"):
-            if item.attrib.get("CiID") == vgen_node_id:
-                existing_vgen = item
-                break
-
-        if existing_vgen is None:
-            for item in elements_node.findall("Item[@Class='CiNode']"):
-                if item.attrib.get("CiID") == vin_node_id:
-                    vgen_item = ET.fromstring(ET.tostring(item, encoding="unicode"))
-                    vgen_item.set("CiID", vgen_node_id)
-                    cn = vgen_item.find("CiNode")
-                    if cn is not None:
-                        cn.set("LocalName", "&ASCVGEN")
-                        ports_el = cn.find("Ports")
-                        if ports_el is not None:
-                            ports_el.clear()
-                            ET.SubElement(ports_el, "Item", {"CiID": xfg_plus_port_id})
-                            ET.SubElement(ports_el, "Item", {"CiID": xfg_vconn_port_id})
-                    elements_node.append(vgen_item)
-                    break
-
-            for item in elements_node.findall("Item[@Class='CiNode']"):
-                if item.attrib.get("CiID") == vin_node_id:
-                    ports_el = item.find("CiNode/Ports")
-                    if ports_el is not None:
-                        for p_it in list(ports_el.findall("Item")):
-                            if p_it.attrib.get("CiID") in (xfg_plus_port_id, xfg_vconn_port_id):
-                                ports_el.remove(p_it)
-
-            for item in elements_node.findall("Item[@Class='CiPort']"):
-                if item.attrib.get("CiID") in (xfg_plus_port_id, xfg_vconn_port_id):
-                    for n_it in item.findall(".//Nodes/Item"):
-                        n_it.set("CiID", vgen_node_id)
-
-            for item in elements_node.findall("Item[@Class='CiComponent']"):
-                if item.attrib.get("CiID") == xfg_vconn_comp_id:
-                    comp_el = item.find("CiComponent")
-                    if comp_el is not None:
-                        comp_el.set("LocalName", "&ASCVGEN")
-                    for s_it in item.findall(".//CiaCollString/strings/Item"):
-                        if s_it.attrib.get("Value") == "&ASCVIN":
-                            s_it.set("Value", "&ASCVGEN")
-
-            for item in elements_node.findall("Item[@Class='CiCircuit']"):
-                nodes_el = item.find("CiCircuit/Nodes")
-                if nodes_el is not None:
-                    ET.SubElement(nodes_el, "Item", {"CiID": vgen_node_id})
-
-            for obj_item in root.findall(".//CODComposite/Objects/Item"):
-                oid = obj_item.attrib.get("ID", "")
-                ocls = obj_item.attrib.get("Class", "")
-                if ocls == "CVirtualConnector" and oid == xfg_vconn_sym_id:
-                    for mod_it in obj_item.findall(".//Element[@NetModifier='&ASCNI_EWB_NET_VIRTUAL']/Item"):
-                        mod_it.set("Value", "&ASCVGEN")
-                    for txt_it in obj_item.findall(".//CIITSymTextCompName"):
-                        txt_it.set("Output", "&ASCVGEN")
-                elif ocls == "CIITLinkComp" and oid in xfg_wire_ids:
-                    link_el = obj_item.find("CIITLinkComp")
-                    if link_el is not None:
-                        link_el.set("Node", vgen_node_id)
-
-            net_items = root.find(".//CDesignNetContainer/NetLabels/Item/Items")
-            if net_items is not None:
-                ET.SubElement(net_items, "CSchDesignNetLabel", {
-                    "Class": "CSchDesignNetLabel",
-                    "Modifier": "8",
-                    "Value": "",
-                    "ID": "{1A94E944-0E79-4B74-AAA0-CCEB8D87E4DB}",
-                    "Priority": "0",
-                    "LastOverruleName": "&ASCVGEN",
-                    "LastNetName": "&ASCVGEN",
-                    "LastLocalName": "&ASCVGEN"
-                })
-
-        vin_ports_set = set()
-        for item in elements_node.findall("Item[@Class='CiNode']"):
-            cn = item.find("CiNode")
+        vin_port_ids = set()
+        for n_it in elements_el.findall("Item[@Class='CiNode']"):
+            cn = n_it.find("CiNode")
             if cn is not None and cn.attrib.get("LocalName") == "&ASCVIN":
-                for p_it in cn.findall("./Ports/Item"):
-                    pid = p_it.attrib.get("CiID", "")
-                    if pid:
-                        vin_ports_set.add(pid)
+                for p_ref in cn.findall("./Ports/Item"):
+                    vin_port_ids.add(p_ref.attrib.get("CiID", ""))
 
-        comp_id_to_vin_pin = {}
-        for item in elements_node.findall("Item[@Class='CiPort']"):
-            pid = item.attrib.get("CiID", "")
-            if pid in vin_ports_set:
-                cp = item.find("CiPort")
+        comp_port_on_vin = {}
+        for p_it in elements_el.findall("Item[@Class='CiPort']"):
+            pid = p_it.attrib.get("CiID", "")
+            if pid in vin_port_ids:
+                cp = p_it.find("CiPort")
                 if cp is not None:
                     cid = cp.attrib.get("Component", "")
                     pname = cp.attrib.get("LocalName", "")
-                    clean_pname = pname[4:] if pname.startswith("&ASC") else pname
-                    if cid and clean_pname and clean_pname != "Dummy_VR_Pin":
-                        comp_id_to_vin_pin[cid] = clean_pname
+                    if pname.startswith("&ASC"):
+                        pname = pname[4:]
+                    if cid and pname:
+                        comp_port_on_vin[cid] = pname
 
         target_comp_el = None
-        target_pin_token = "%t1"
-
-        if injection_target:
-            wanted_lname = f"&ASC{injection_target}" if not injection_target.startswith("&ASC") else injection_target
-            for item in elements_node.findall("Item[@Class='CiComponent']"):
-                cid = item.attrib.get("CiID", "")
-                comp_el = item.find("CiComponent")
-                if comp_el is not None and comp_el.attrib.get("LocalName") == wanted_lname:
-                    target_comp_el = comp_el
-                    if cid in comp_id_to_vin_pin:
-                        target_pin_token = f"%t{comp_id_to_vin_pin[cid]}"
-                    break
+        target_pin_name = "1"
+        for c_it in elements_el.findall("Item[@Class='CiComponent']"):
+            cid = c_it.attrib.get("CiID", "")
+            cc = c_it.find("CiComponent")
+            if cc is None:
+                continue
+            lname = cc.attrib.get("LocalName", "")
+            ref = lname[4:] if lname.startswith("&ASC") else lname
+            if injection_target and ref == injection_target:
+                target_comp_el = cc
+                target_pin_name = comp_port_on_vin.get(cid, "1")
+                break
+            if cid in comp_port_on_vin and re.match(r"^[RCL]\d+$", ref, re.IGNORECASE):
+                target_comp_el = cc
+                target_pin_name = comp_port_on_vin[cid]
+                break
 
         if target_comp_el is None:
-            candidates = []
-            for item in elements_node.findall("Item[@Class='CiComponent']"):
-                cid = item.attrib.get("CiID", "")
-                if cid not in comp_id_to_vin_pin:
-                    continue
-                comp_el = item.find("CiComponent")
-                if comp_el is None:
-                    continue
-                lname = comp_el.attrib.get("LocalName", "")
-                clean_ref = lname[4:] if lname.startswith("&ASC") else lname
-                if clean_ref.upper().startswith(("XFG", "XSC", "XBP", "VIN", "VOUT", "VGEN", "0", "GND")):
-                    continue
-                exprt_el = comp_el.find(".//CiaSpiceTmpltExprt")
-                if exprt_el is not None:
-                    prio = 0 if clean_ref.upper().startswith("R") else (1 if clean_ref.upper().startswith(("L", "C")) else 2)
-                    candidates.append((prio, clean_ref, comp_el, f"%t{comp_id_to_vin_pin[cid]}"))
-            if candidates:
-                candidates.sort(key=lambda x: (x[0], x[1]))
-                target_comp_el = candidates[0][2]
-                target_pin_token = candidates[0][3]
+            return xml_text
 
-        if target_comp_el is not None:
-            extra_tones = harmonics[1:]
-            ext_lines: List[str] = []
+        vfg_node_id = "490443665"
+        xfg_ports = {"495909056", "495902920"}
+        existing_vfg = None
+        for n_it in elements_el.findall("Item[@Class='CiNode']"):
+            cn = n_it.find("CiNode")
+            if cn is not None and cn.attrib.get("LocalName") == "&ASCVIN":
+                p_container = cn.find("Ports")
+                if p_container is not None:
+                    for p_el in list(p_container.findall("Item")):
+                        if p_el.attrib.get("CiID") in xfg_ports:
+                            p_container.remove(p_el)
+            elif n_it.attrib.get("CiID") == vfg_node_id:
+                existing_vfg = n_it
+
+        if existing_vfg is None:
+            for n_it in elements_el.findall("Item[@Class='CiNode']"):
+                cn = n_it.find("CiNode")
+                if cn is not None and cn.attrib.get("LocalName") == "&ASCVIN":
+                    import copy
+                    vfg_it = copy.deepcopy(n_it)
+                    vfg_it.set("CiID", vfg_node_id)
+                    vfg_cn = vfg_it.find("CiNode")
+                    vfg_cn.set("LocalName", "&ASCVFG")
+                    vfg_ports = vfg_cn.find("Ports")
+                    vfg_ports.clear()
+                    for xpid in sorted(xfg_ports):
+                        ET.SubElement(vfg_ports, "Item", {"CiID": xpid})
+                    elements_el.append(vfg_it)
+                    break
+
+        for c_it in elements_el.findall("Item[@Class='CiCircuit']"):
+            nodes_el = c_it.find("CiCircuit/Nodes")
+            if nodes_el is not None:
+                if not any(it.attrib.get("CiID") == vfg_node_id for it in nodes_el.findall("Item")):
+                    ET.SubElement(nodes_el, "Item", {"CiID": vfg_node_id})
+
+        for p_it in elements_el.findall("Item[@Class='CiPort']"):
+            if p_it.attrib.get("CiID") in xfg_ports:
+                n_el = p_it.find("CiPort/Nodes")
+                if n_el is not None:
+                    n_el.clear()
+                    ET.SubElement(n_el, "Item", {"CiID": vfg_node_id})
+
+        for lk_it in objects_el.findall("Item[@Class='CIITLinkComp']"):
+            if lk_it.attrib.get("ID") in ("477615600", "477617544"):
+                lk = lk_it.find("CIITLinkComp")
+                if lk is not None:
+                    lk.set("Node", vfg_node_id)
+                    for mod_it in lk.findall(".//Element[@NetModifier='&ASCNI_EWB_NET_AUTONAMED']/Item"):
+                        w_guid = mod_it.attrib.get("Guid", "")
+                        if w_guid:
+                            for nl in root.findall(f".//CDesignNetContainer//CSchDesignNetLabel[@ID='{w_guid}']"):
+                                nl.set("LastNetName", "&ASCVFG")
+
+        for vc_it in objects_el.findall("Item[@Class='CVirtualConnector']"):
+            if vc_it.attrib.get("ID") == "192713976":
+                vc = vc_it.find("CVirtualConnector")
+                if vc is not None:
+                    txt_el = vc.find(".//CIITSymTextCompName")
+                    if txt_el is not None:
+                        txt_el.set("Output", "&ASCVFG")
+                    for mod_it in vc.findall(".//Element[@NetModifier='&ASCNI_EWB_NET_VIRTUAL']/Item"):
+                        mod_it.set("Value", "&ASCVFG")
+                        m_guid = mod_it.attrib.get("Guid", "")
+                        if m_guid:
+                            for nl in root.findall(f".//CDesignNetContainer//CSchDesignNetLabel[@ID='{m_guid}']"):
+                                nl.set("LastNetName", "&ASCVFG")
+                                nl.set("LastLocalName", "&ASCVFG")
+                                nl.set("LastOverruleName", "&ASCVFG")
+                    vc_cid = vc.attrib.get("CiComponent", "")
+                    for c_it in elements_el.findall("Item[@Class='CiComponent']"):
+                        if c_it.attrib.get("CiID") == vc_cid:
+                            cc = c_it.find("CiComponent")
+                            if cc is not None:
+                                cc.set("LocalName", "&ASCVFG")
+
+        exprt = target_comp_el.find(".//CiaSpiceTmpltExprt")
+        if exprt is not None:
+            raw_s = exprt.attrib.get("String", "")
+            base_s = raw_s[4:] if raw_s.startswith("&ASC") else raw_s
+            base_s = base_s.replace(CRLF_TOKEN, LF).replace(LF_TOKEN, LF)
+            clean_lines = [ln for ln in base_s.splitlines() if ln.strip() and not ln.strip().startswith("v_xfg_s")]
+            mt_lines = []
             for idx, tone in enumerate(extra_tones):
-                nin = "VGEN" if idx == 0 else f"n_harm_{idx}"
-                nout = target_pin_token if idx == len(extra_tones) - 1 else f"n_harm_{idx+1}"
-                ext_lines.append(
-                    f"v_harm_{idx+1} {nout} {nin} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6f} {tone.freq_hz:.12e} 0)"
+                n_in = "VFG" if idx == 0 else f"n_xfg_s{idx}"
+                n_out = f"%t{target_pin_name}" if idx == len(extra_tones) - 1 else f"n_xfg_s{idx + 1}"
+                mt_lines.append(
+                    f"v_xfg_s{idx + 1} {n_in} {n_out} dc 0 ac 0 sin(0 {tone.amplitude_vp:.6g} {tone.freq_hz:.6g} 0)"
                 )
-            exprt_el = target_comp_el.find(".//CiaSpiceTmpltExprt")
-            if exprt_el is not None:
-                raw_str = exprt_el.attrib.get("String", "&ASCr%p %t1 %t2 #1")
-                body = raw_str[4:] if raw_str.startswith("&ASC") else raw_str
-                body = body.replace(CRLF_TOKEN, LF).replace(LF_TOKEN, LF)
-                clean_lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("v_harm_")]
-                final_lines = ext_lines + clean_lines
-                exprt_el.set("String", "&ASC" + CRLF_TOKEN.join(final_lines) + CRLF_TOKEN)
+            full_tpl = CRLF_TOKEN.join(clean_lines + mt_lines) + CRLF_TOKEN
+            exprt.set("String", "&ASC" + full_tpl)
 
         return cls.serialize_dom_restoring_multiline_attrs(root)
