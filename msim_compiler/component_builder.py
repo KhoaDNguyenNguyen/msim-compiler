@@ -82,6 +82,20 @@ class ComponentDomBuilder:
                 self._sanitize_active_skeleton(sk_active)
                 wrap = ET.SubElement(schema_root, "Skeleton", {"SkeletonKey": "ACTIVE_IC"})
                 wrap.append(sk_active)
+            elif lname == "&ASCVCC":
+                sk_vcc = copy.deepcopy(comp)
+                ports_el = sk_vcc.find("Ports")
+                if ports_el is not None:
+                    ports_el.clear()
+                wrap_vcc = ET.SubElement(schema_root, "Skeleton", {"SkeletonKey": "VCC"})
+                wrap_vcc.append(sk_vcc)
+            elif lname == "&ASCVEE":
+                sk_vee = copy.deepcopy(comp)
+                ports_el = sk_vee.find("Ports")
+                if ports_el is not None:
+                    ports_el.clear()
+                wrap_vee = ET.SubElement(schema_root, "Skeleton", {"SkeletonKey": "VEE"})
+                wrap_vee.append(sk_vee)
             elif "GROUND" not in [c.attrib.get("SkeletonKey") for c in schema_root]:
                 raw_sub = ET.tostring(comp, encoding="unicode")
                 if "POWER_SOURCES" in raw_sub and "GROUND" in raw_sub:
@@ -163,9 +177,9 @@ class ComponentDomBuilder:
                 elif val.startswith("&ASCr%p") or val.startswith("&ASCc%p") or val.startswith("&ASCl%p"):
                     el.set("Value", "&ASC__MSIM_SPICE_TPL__")
         for plist in comp_el.findall(".//CiaParamList") + comp_el.findall(".//CiaProperDlg"):
-            for dbl in plist.findall(".//doubles/Item"):
-                if "Value" in dbl.attrib:
-                    dbl.set("Value", "__MSIM_NUM_VAL__")
+            dbl_items = plist.findall(".//doubles/Item")
+            if dbl_items and "Value" in dbl_items[0].attrib:
+                dbl_items[0].set("Value", "__MSIM_NUM_VAL__")
 
     @staticmethod
     def _sanitize_active_skeleton(comp_el: ET.Element) -> None:
@@ -280,15 +294,27 @@ class ComponentDomBuilder:
         fam_up = part.family_name.upper()
         ref_up = refdes.upper()
 
+        is_vcc = (comp_up == "VCC") or ref_up.startswith("VCC")
+        is_vee = (comp_up == "VEE") or ref_up.startswith("VEE")
         is_ground = ("GROUND" in comp_up) or (ref_up == "0") or ref_up.startswith("GND")
-        is_capacitor = ("CAPACITOR" in comp_up) or ("CAPACITOR" in fam_up) or (ref_up.startswith("C") and not is_ground)
+        is_capacitor = ("CAPACITOR" in comp_up) or ("CAPACITOR" in fam_up) or (ref_up.startswith("C") and not is_ground and not is_vcc)
         is_inductor = ("INDUCTOR" in comp_up) or ("INDUCTOR" in fam_up) or (ref_up.startswith("L") and not is_ground)
         is_resistor = ("RESISTOR" in comp_up) or ("RESISTOR" in fam_up) or (ref_up.startswith("R") and not is_ground)
         is_passive_virtual = is_capacitor or is_inductor or is_resistor
 
         extra_model_item: Optional[ET.Element] = None
 
-        if is_ground:
+        if is_vcc:
+            local_ref_name = "VCC"
+            inst_ref_attr = ""
+            lbl_sel_attr = "0"
+            sk_comp = copy.deepcopy(self._skeletons.get("VCC", self._skeletons["GROUND"]))
+        elif is_vee:
+            local_ref_name = "VEE"
+            inst_ref_attr = ""
+            lbl_sel_attr = "0"
+            sk_comp = copy.deepcopy(self._skeletons.get("VEE", self._skeletons["GROUND"]))
+        elif is_ground:
             local_ref_name = "0"
             inst_ref_attr = ""
             lbl_sel_attr = "0"
@@ -355,9 +381,9 @@ class ComponentDomBuilder:
                     el.set("String", f"&ASC{eff_spice_tpl}")
 
             for plist in sk_comp.findall(".//CiaParamList") + sk_comp.findall(".//CiaProperDlg"):
-                for dbl_item in plist.findall(".//doubles/Item"):
-                    if "Value" in dbl_item.attrib:
-                        dbl_item.set("Value", f"{num_val:g}")
+                dbl_items = plist.findall(".//doubles/Item")
+                if dbl_items and "Value" in dbl_items[0].attrib:
+                    dbl_items[0].set("Value", f"{num_val:g}")
                 prm_items = plist.findall("./parameters/Item")
                 if len(prm_items) >= 2:
                     prm_items[1].set("Value", f"&ASC{spice_val}")
@@ -376,10 +402,13 @@ class ComponentDomBuilder:
                 mod_spice_line = f".MODEL {mod_local} NPN(Is=14.34e-15 Bf=255.9 Vaf=74.03 Ikf=0.2847 Ne=1.307 Br=6.092 Rc=1 Rb=10 Cjc=7.306e-12 Cje=22.01e-12 Tf=411.1e-12 Tr=46.91e-9)"
                 eff_spice_tpl = "q%p %tC %tB %tE %m"
             elif "OPAMP" in fam_up or "741" in comp_up or ref_up.startswith("U"):
-                mod_local = f"LM741__OPAMP__{model_idx}"
-                raw_sp = " ".join(part.spice_data.splitlines()).strip()
-                mod_spice_line = raw_sp if raw_sp else f".SUBCKT {mod_local} 1 2 3 4 5\r\nE1 3 0 1 2 200000\r\nR1 1 2 2Meg\r\nROUT 3 5 75\r\n.ENDS"
-                eff_spice_tpl = part.spice_template.strip() or "x%p %t3 %t2 %t7 %t4 %t6 %m"
+                mod_local = f"741__OPAMP__{model_idx}"
+                mod_spice_line = f".SUBCKT {mod_local} 1 2 3 4 5__MSIM_CRLF__VC 5 15 DC 1.68573V__MSIM_CRLF__VE 12 4 DC 1.68573V__MSIM_CRLF__IEE 10 4 DC 1.516e-005A__MSIM_CRLF__R1  10  0 10Gohm__MSIM_CRLF__R6  11  0 100Kohm__MSIM_CRLF__R7   5  4 1Kohm__MSIM_CRLF__Rc1  6  5 5305.16ohm__MSIM_CRLF__Rc2  5  7 5305.16ohm__MSIM_CRLF__Re1  9 10 1839.19ohm__MSIM_CRLF__Re2  8 10 1839.19ohm__MSIM_CRLF__Ro1  1 14 37.5ohm__MSIM_CRLF__Ro2 14  0 37.5ohm__MSIM_CRLF__Ree 10  0 1.31926e+007ohm__MSIM_CRLF__Rcc  0 13 2.20906e-005ohm__MSIM_CRLF__Cee  0 10 1e-012__MSIM_CRLF__Cc  14 11 3e-011__MSIM_CRLF__C1   6  7 1e-016__MSIM_CRLF__GA  11  0  6  7 0.000188496__MSIM_CRLF__GC   0 13  1  0 45268.1__MSIM_CRLF__GB  14  0 11  0 282.942__MSIM_CRLF__GCM  0 11 10  0 5.96075e-009__MSIM_CRLF__D1  14 13 Dopamp1__MSIM_CRLF__D2  13 14 Dopamp1__MSIM_CRLF__D3   1 15 Dopamp2__MSIM_CRLF__D4  12  1 Dopamp2__MSIM_CRLF__Qt1  6 2 9 Qopamp1__MSIM_CRLF__Qt2  7 3 8 Qopamp2__MSIM_CRLF__.MODEL Dopamp1 D (Is=7.53769e-014A Rs=0 Cjo=0F Vj=750mV Tt=0s M=0)__MSIM_CRLF__.MODEL Dopamp2 D (Is=8e-016A Rs=0 Cjo=0F Vj=750mV Tt=0s M=0)__MSIM_CRLF__.MODEL Qopamp1 NPN (Is=8e-016A BF=83.3333 BR=960m__MSIM_CRLF__+       Rb=0ohm Re=0ohm Rc=0ohm Cjs=0F Cje=0F Cjc=0F__MSIM_CRLF__+       Vje=750m Vjc=750m Tf=0 Tr=0 mje=0 mjc=0 VA=50)__MSIM_CRLF__.MODEL Qopamp2 NPN (Is=8.30948e-016A BF=107.143 BR=960m__MSIM_CRLF__+       Rb=0ohm Re=0ohm Rc=0ohm Cjs=0F Cje=0F Cjc=0F__MSIM_CRLF__+       Vje=750m Vjc=750m Tf=0 Tr=0 mje=0 mjc=0 VA=50)__MSIM_CRLF__.ENDS"
+                pin_names_set = {p.name for p in part.pins}
+                if "IN+" in pin_names_set and "OUT" in pin_names_set:
+                    eff_spice_tpl = "x%p %tOUT %tIN- %tIN+ %tVS- %tVS+ %m"
+                else:
+                    eff_spice_tpl = "x%p %t6 %t2 %t3 %t4 %t7 %m"
             else:
                 mod_local = f"{part.comp_name}__{part.family_name}__{model_idx}"
                 raw_sp = " ".join(part.spice_data.splitlines()).strip()
