@@ -176,9 +176,7 @@ def compile_progressive_circuit(
     )
 
 if __name__ == "__main__":
-    for old_f in os.listdir("dist"):
-        if old_f.endswith((".ms14", ".xml")):
-            os.remove(os.path.join("dist", old_f))
+    os.makedirs("dist", exist_ok=True)
 
     compile_progressive_circuit(
         "lvl1_easy",

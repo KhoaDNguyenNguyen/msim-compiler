@@ -1,3 +1,4 @@
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
@@ -20,114 +21,91 @@ class ICircuitSynthesizer(ABC):
         raise NotImplementedError
 
 class ButterworthFilterPlugin(ICircuitSynthesizer):
-    def __init__(self, base_resistance_ohm: float = 2000.0):
+    def __init__(self, base_resistance_ohm: float = 1000.0):
+        self.base_r = base_resistance_ohm
         self.math_synth = HighOrderButterworthSynthesizer(base_resistance_ohm=base_resistance_ohm)
 
     def generate_topology(self, **kwargs) -> SynthesizedTopologyPlan:
         order = int(kwargs.get("order", 7))
         fc_hz = float(kwargs.get("fc_hz", 12000.0))
-        tones_str = str(kwargs.get("tones_str", "Swept AC/Sine"))
+        tones_str = str(kwargs.get("tones_str", "Native XFG1 Source"))
 
-        design = self.math_synth.synthesize(order=order, fc_hz=fc_hz)
+        wc = 2.0 * math.pi * float(fc_hz)
+        r0 = self.base_r
+
         parts: List[PartPlacementSpec] = []
         nets: List[NetConnectionSpec] = []
         gnd_terms: List[Tuple[str, str]] = []
-        spice_overrides: Dict[str, str] = {}
+        stage_summaries: List[str] = []
 
-        rc_pitch = 81
-        bq_pitch = 144 if order <= 9 else 126
-        dx_rb = 63 if order <= 9 else 54
-        total_w = sum(rc_pitch if st.order == 1 else bq_pitch for st in design.stages)
-        cx_canvas = 585
-        col_x = AffineGrid2D.snap9(max(243, min(450, cx_canvas - total_w // 2)))
-        row_fb_y = 162
+        pitch_x = 90
+        total_w = (order + 1) * pitch_x
+        col_x = AffineGrid2D.snap9(max(261, min(432, 585 - total_w // 2)))
         row_series_y = 243
         row_shunt_y = 315
 
-        r_counter = 1
-        c_counter = 1
+        rs_val = MS14Document.format_si(r0)
+        parts.append(PartPlacementSpec("R1", "RESISTOR_VIRTUAL", rs_val, x=col_x, y=row_series_y, rotation=0))
+        nets.append(NetConnectionSpec("VIN", [("R1", "1")]))
+        prev_series_ref = "R1"
+        prev_series_pin = "2"
+        col_x += pitch_x
 
-        rin_ref = f"R{r_counter}"
-        r_counter += 1
-        parts.append(PartPlacementSpec(rin_ref, "RESISTOR_VIRTUAL", "100k", x=col_x - 45, y=row_shunt_y, rotation=90))
-        gnd_terms.append((rin_ref, "2"))
+        l_idx = 1
+        c_idx = 1
+        node_idx = 1
 
-        stage_out_terms: List[Tuple[str, str]] = [(rin_ref, "1")]
-        stage_summaries: List[str] = []
-
-        for idx, st in enumerate(design.stages):
-            s_num = idx + 1
-            is_last = (idx == len(design.stages) - 1)
-            in_net_name = "VIN" if idx == 0 else f"N_ST{idx}_OUT"
-
-            if st.order == 1:
-                r_ref = f"R{r_counter}"
-                r_counter += 1
-                c_ref = f"C{c_counter}"
-                c_counter += 1
-                r_val = MS14Document.format_si(st.r1_ohm)
-                c_val = MS14Document.format_si(st.c1_farad)
-
-                parts.append(PartPlacementSpec(r_ref, "RESISTOR_VIRTUAL", r_val, x=col_x, y=row_series_y, rotation=0))
-                parts.append(PartPlacementSpec(c_ref, "CAPACITOR_VIRTUAL", c_val, x=col_x + 36, y=row_shunt_y, rotation=90))
-
-                stage_out_terms.append((r_ref, "1"))
-                nets.append(NetConnectionSpec(in_net_name, stage_out_terms))
-
-                stage_out_terms = [(r_ref, "2"), (c_ref, "1")]
-                if is_last:
-                    nets.append(NetConnectionSpec("VOUT", stage_out_terms))
+        for k in range(1, order + 1):
+            gk = 2.0 * math.sin((2.0 * k - 1.0) * math.pi / (2.0 * order))
+            if k % 2 == 1:
+                c_farad = gk / (wc * r0)
+                c_val = MS14Document.format_si(c_farad)
+                c_ref = f"C{c_idx}"
+                c_idx += 1
+                parts.append(PartPlacementSpec(c_ref, "CAPACITOR_VIRTUAL", c_val, x=col_x, y=row_shunt_y, rotation=90))
                 gnd_terms.append((c_ref, "2"))
-                stage_summaries.append(f"Stage {s_num} (1st-Ord RC): {r_ref}={r_val}, {c_ref}={c_val}F")
-                col_x += rc_pitch
+                stage_summaries.append(f"Element {k} (Shunt Cap): {c_ref}={c_val}F")
+
+                if k == order:
+                    rl_ref = "R2"
+                    parts.append(PartPlacementSpec(rl_ref, "RESISTOR_VIRTUAL", rs_val, x=col_x + pitch_x, y=row_shunt_y, rotation=90))
+                    gnd_terms.append((rl_ref, "2"))
+                    nets.append(NetConnectionSpec("VOUT", [(prev_series_ref, prev_series_pin), (c_ref, "1"), (rl_ref, "1")]))
+                else:
+                    l_next_gk = 2.0 * math.sin((2.0 * (k + 1) - 1.0) * math.pi / (2.0 * order))
+                    l_henry = (l_next_gk * r0) / wc
+                    l_val = MS14Document.format_si(l_henry)
+                    l_ref = f"L{l_idx}"
+                    l_idx += 1
+                    col_x += pitch_x
+                    parts.append(PartPlacementSpec(l_ref, "INDUCTOR_VIRTUAL", l_val, x=col_x, y=row_series_y, rotation=0))
+                    nets.append(NetConnectionSpec(f"N_LAD_{node_idx}", [(prev_series_ref, prev_series_pin), (c_ref, "1"), (l_ref, "1")]))
+                    node_idx += 1
+                    prev_series_ref = l_ref
+                    prev_series_pin = "2"
+                    stage_summaries.append(f"Element {k+1} (Series Ind): {l_ref}={l_val}H")
+                    col_x += pitch_x
             else:
-                ra_ref = f"R{r_counter}"
-                r_counter += 1
-                rb_ref = f"R{r_counter}"
-                r_counter += 1
-                cfb_ref = f"C{c_counter}"
-                c_counter += 1
-                csh_ref = f"C{c_counter}"
-                c_counter += 1
-
-                ra_val = MS14Document.format_si(st.r1_ohm)
-                rb_val = MS14Document.format_si(st.r2_ohm)
-                csh_val = MS14Document.format_si(st.c1_farad)
-                cfb_val = MS14Document.format_si(st.c2_farad)
-
-                parts.append(PartPlacementSpec(ra_ref, "RESISTOR_VIRTUAL", ra_val, x=col_x, y=row_series_y, rotation=0))
-                parts.append(PartPlacementSpec(rb_ref, "RESISTOR_VIRTUAL", rb_val, x=col_x + dx_rb, y=row_series_y, rotation=0))
-                parts.append(PartPlacementSpec(cfb_ref, "CAPACITOR_VIRTUAL", cfb_val, x=col_x + dx_rb, y=row_fb_y, rotation=0))
-                parts.append(PartPlacementSpec(csh_ref, "CAPACITOR_VIRTUAL", csh_val, x=col_x + dx_rb + 36, y=row_shunt_y, rotation=90))
-
-                stage_out_terms.append((ra_ref, "1"))
-                nets.append(NetConnectionSpec(in_net_name, stage_out_terms))
-                nets.append(NetConnectionSpec(f"N_ST{s_num}_MID", [(ra_ref, "2"), (rb_ref, "1"), (cfb_ref, "1")]))
-
-                stage_out_terms = [(rb_ref, "2"), (csh_ref, "1"), (cfb_ref, "2")]
-                if is_last:
-                    nets.append(NetConnectionSpec("VOUT", stage_out_terms))
-                gnd_terms.append((csh_ref, "2"))
-
-                spice_overrides[ra_ref] = "e_in_%p n_in_%p 0 %t1 0 1.0\r\nr%p n_in_%p %t2 \x231"
-                spice_overrides[rb_ref] = f"r%p %t1 n_pls_%p \x231\r\nc_sk_%p n_pls_%p 0 {st.c1_farad:.6e}\r\nr_dc_%p n_pls_%p 0 100Meg\r\ne_sk_%p %t2 0 n_pls_%p 0 1.0"
-                stage_summaries.append(f"Stage {s_num} (Biquad Q={st.q_factor:.3f}): {ra_ref}={rb_ref}={ra_val}, {cfb_ref}={cfb_val}F, {csh_ref}={csh_val}F")
-                col_x += bq_pitch
+                if k == order:
+                    rl_ref = "R2"
+                    parts.append(PartPlacementSpec(rl_ref, "RESISTOR_VIRTUAL", rs_val, x=col_x, y=row_shunt_y, rotation=90))
+                    gnd_terms.append((rl_ref, "2"))
+                    nets.append(NetConnectionSpec("VOUT", [(prev_series_ref, prev_series_pin), (rl_ref, "1")]))
 
         if gnd_terms:
             nets.append(NetConnectionSpec("0", gnd_terms))
 
         banner_lines = [
-            f"Topology: {order}th-Order Butterworth Cascade | Cutoff fc = {fc_hz/1000.0:.2f} kHz | Roll-off = -{20*order} dB/dec",
-            f"Multi-Tone Input (VIN): {tones_str}"
+            f"Topology: {order}th-Order Pure Butterworth LC Ladder | Cutoff fc = {fc_hz/1000.0:.2f} kHz | Roll-off = -{20*order} dB/dec",
+            f"Source Mode: {tones_str} | 100% Native Vanilla SPICE Components (Copy-Paste Ready)"
         ] + stage_summaries
 
         return SynthesizedTopologyPlan(
-            title=f"=== SYNTHESIZED {order}TH-ORDER BUTTERWORTH ACTIVE FILTER SPECIFICATION ===",
+            title=f"=== SYNTHESIZED {order}TH-ORDER BUTTERWORTH FILTER SPECIFICATION ===",
             banner_lines=banner_lines,
             parts=parts,
             nets=nets,
-            spice_overrides=spice_overrides,
+            spice_overrides={},
             fc_hz=fc_hz
         )
 
