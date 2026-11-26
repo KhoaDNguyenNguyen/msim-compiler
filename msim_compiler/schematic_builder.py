@@ -1794,6 +1794,7 @@ class MultisimSchematicBuilder:
             model_id="", spice_template="", spice_data=""
         )
         vc_key = f"__VCONN_{net_name}__"
+	
         vc_inst = PlacedComponentInstance(
             refdes=vc_key, part=dummy_part, ci_id=vc_ci_id, sym_id=vc_sym_id,
             model_ci_id=None, guid=vc_guid, x=box_x, y=box_y, rotation=0,
@@ -1893,7 +1894,57 @@ class MultisimSchematicBuilder:
         return self
 
     def add_schematic_info_banner(self, title: str, lines: List[str], x: int = 333, y: int = 477) -> None:
-        return
+        def encode_msim_text(raw_str: str) -> str:
+            has_unicode = any(ord(ch) > 127 for ch in raw_str)
+            if not has_unicode:
+                safe_asc = (
+                    raw_str.replace("&", "&amp;")
+                    .replace('"', "&quot;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+                return f"&amp;ASC{safe_asc}"
+            out_parts: List[str] = []
+            for ch in raw_str:
+                code = ord(ch)
+                if code > 127:
+                    out_parts.append(f"_uc1{code:04x}")
+                elif ch == "_":
+                    out_parts.append("__")
+                elif ch == "&":
+                    out_parts.append("&amp;")
+                elif ch == '"':
+                    out_parts.append("&quot;")
+                elif ch == "<":
+                    out_parts.append("&lt;")
+                elif ch == ">":
+                    out_parts.append("&gt;")
+                else:
+                    out_parts.append(ch)
+            return "&amp;UNI" + "".join(out_parts)
+
+        all_lines = [title] + list(lines)
+        text_items: List[str] = []
+        ref_items: List[str] = []
+        for idx, line_str in enumerate(all_lines):
+            txt_id = self._alloc_id()
+            curr_y = y + (idx * 22)
+            font_h = "-18" if idx == 0 else "-13"
+            color = "255" if idx % 2 == 0 else "16711680"
+            encoded_output = encode_msim_text(line_str)
+            txt_xml = (
+                f'<Item ID="{txt_id}" Class="CODTextComp">\n'
+                f'<CODTextComp Class="CODTextComp" instID="0" Stretchable="1" Moveable="1" LabelSelectable="1" Selectable="1" LockedPenColor="0" LockedBrushColor="0" Layer="511" Output="{encoded_output}" MultiLine="0" WordBreak="0" PenColor="{color}" FgColor="{color}" BgColor="16777215" Font-Height="{font_h}" Font-Width="0" Font-Escapement="0" Font-Orientation="0" Font-Weight="700" Font-Italic="0" Font-Underline="0" Font-StrikeOut="0" Font-CharSet="0" Font-OutPrecision="3" Font-ClipPrecision="2" Font-Quality="1" Font-PitchAndFamily="34" Font-FaceName="&amp;ASCArial" Brush-Style="1" Pen-Style="5" Transformer-M00="1" Transformer-M01="0" Transformer-M10="0" Transformer-M11="1" Transformer-M20="{x}" Transformer-M21="{curr_y}" Hidden="0" HorizontalAlign="0" VerticalAlign="0"/>\n'
+                f'</Item>'
+            )
+            text_items.append(txt_xml)
+            ref_items.append(f'<Item ID="{txt_id}" Class="CODTextComp"/>')
+        if text_items:
+            self.xml_text = self.xml_text.replace(
+                "</Objects>\n<ReferencedComponents>",
+                "\n".join(text_items) + "\n</Objects>\n<ReferencedComponents>\n" + "\n".join(ref_items),
+                1
+            )
 
     def validate_dom_integrity(self) -> Dict[str, Any]:
         root = MultisimDOMManipulator.parse_dom_preserving_multiline_attrs(self.xml_text)
