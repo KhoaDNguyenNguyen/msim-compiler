@@ -1,6 +1,8 @@
+import sys
 import argparse
-from .logger import get_logger
-from .models import HarmonicTone
+from msim_compiler.logger import get_logger
+from msim_compiler.models import HarmonicTone
+from msim_compiler.drm_guard import GLOBAL_DRM
 
 def main():
     parser = argparse.ArgumentParser(description="Multisim 14 Zero-GUI Compiler & Vision Synthesizer")
@@ -13,18 +15,25 @@ def main():
     args = parser.parse_args()
     logger = get_logger("MSIM-BOOTSTRAP")
 
-    if args.gui:
-        logger.info("Launching Desktop GUI...")
-        from .gui import launch_gui
+    if args.gui or len(sys.argv) == 1:
+        logger.info("Launching MSimStudio Desktop GUI...")
+        from msim_compiler.gui import launch_gui
         launch_gui()
-    elif args.image:
+        return
+
+    if not GLOBAL_DRM.load_persisted_license():
+        logger.warning("Unlicensed CLI invocation detected; writing watermarked schematic.")
+        GLOBAL_DRM.export_unlicensed_schematic(args.out)
+        return
+
+    if args.image:
         logger.info(f"Running Vision-to-Multisim pipeline on '{args.image}'...")
-        from .vision_parser import OpticalCircuitParser
+        from msim_compiler.vision_parser import OpticalCircuitParser
         parser_eng = OpticalCircuitParser()
         parser_eng.compile_image_to_ms14(args.image, args.out, fc_hz=args.filter_fc)
     else:
         logger.info("Running Code-to-Multisim Active Filter Synthesizer...")
-        from .compiler import MultisimHighOrderCompiler
+        from msim_compiler.compiler import MultisimHighOrderCompiler
         c = MultisimHighOrderCompiler()
         fc = args.filter_fc
         tones = [
