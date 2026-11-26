@@ -16,3 +16,15 @@ flatten.py
 multemp.zsh
 all_code_context.txt
 gitlog.txt
+dist_obf/
+.pyarmor/
+pyarmor.bug.log
+*.bug.log
+new_log_git.txt
+*log_git*.txt
+admin_keygen.py
+/config/
+update_and_build.zsh
+check_r1.py
+test_cai-nua.py
+week3.py
